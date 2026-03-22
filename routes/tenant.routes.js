@@ -8,9 +8,10 @@ const {
 } = require("../controllers/tenant.controller");
 
 const { verifyToken } = require("../middleware/auth.middleware");
+const { contractUpload } = require("../middleware/upload.middleware");
 
 router.get("/", verifyToken, getTenants);
 router.get("/form-options", verifyToken, getTenantFormOptions);
-router.post("/", verifyToken, createTenant);
+router.post("/", verifyToken, contractUpload.single("contract_file"), createTenant);
 
 module.exports = router;
