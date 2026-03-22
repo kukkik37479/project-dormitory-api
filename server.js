@@ -10,6 +10,8 @@ const myDormRoutes = require("./routes/myDorm.routes");
 const tenantRoutes = require("./routes/tenant.routes");
 const roomsRoutes = require("./routes/rooms.routes");
 const contractRoutes = require("./routes/contract.routes");
+const chatRoutes = require("./routes/chat.routes");
+const announcementRoutes = require("./routes/announcement.routes");
 
 dotenv.config();
 
@@ -36,6 +38,8 @@ app.use("/api/my-dorm", myDormRoutes);
 app.use("/api/tenants", tenantRoutes);
 app.use("/api/rooms", roomsRoutes);
 app.use("/api/contracts", contractRoutes);
+app.use("/api/chat", chatRoutes);
+app.use("/api/announcements", announcementRoutes);
 
 app.listen(PORT, async () => {
   try {
