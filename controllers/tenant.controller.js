@@ -42,6 +42,15 @@ function buildRelativeFilePath(file) {
   return path.relative(projectRoot, file.path).replace(/\\/g, "/");
 }
 
+function decodeUploadedOriginalName(file) {
+  if (!file?.originalname) return null;
+  try {
+    return Buffer.from(file.originalname, "latin1").toString("utf8");
+  } catch {
+    return file.originalname;
+  }
+}
+
 const getTenants = async (req, res) => {
   try {
     const dormId = req.user?.dormId;
@@ -287,7 +296,10 @@ const createTenant = async (req, res) => {
 
     const fullName = s(req.body.full_name);
     const phone = nullableString(req.body.phone);
-    const username = s(req.body.username).toLowerCase();
+    const rawUsername = s(req.body.username).toLowerCase();
+    const username = rawUsername.includes("@")
+      ? rawUsername.split("@")[0]
+      : rawUsername;
     const password = s(req.body.password);
     const roomId = nullableString(req.body.room_id);
     const buildingId = nullableString(req.body.building_id);
@@ -466,6 +478,8 @@ const createTenant = async (req, res) => {
     );
 
     const relativeFilePath = buildRelativeFilePath(file);
+    const originalFileName = decodeUploadedOriginalName(file);
+    const contractFileUrl = relativeFilePath ? `/${relativeFilePath}` : null;
 
     const finalRentAmount =
       req.body.rent_amount === undefined || req.body.rent_amount === ""
@@ -489,6 +503,7 @@ const createTenant = async (req, res) => {
         note,
         contract_file_path,
         contract_file_name,
+        contract_file_url,
         contract_file_mime_type,
         contract_file_size
       )
@@ -508,7 +523,8 @@ const createTenant = async (req, res) => {
         $12,
         $13,
         $14,
-        $15
+        $15,
+        $16
       )
       RETURNING
         id,
@@ -525,7 +541,8 @@ const createTenant = async (req, res) => {
         status,
         note,
         contract_file_path,
-        contract_file_name
+        contract_file_name,
+        contract_file_url
       `,
       [
         dormId,
@@ -540,7 +557,8 @@ const createTenant = async (req, res) => {
         billingDueDay,
         contractNote,
         relativeFilePath,
-        file?.originalname || null,
+        originalFileName,
+        contractFileUrl,
         file?.mimetype || null,
         file?.size || null,
       ]
@@ -565,10 +583,7 @@ const createTenant = async (req, res) => {
       data: {
         tenant: tenantUser,
         tenant_profile: tenantProfileResult.rows[0],
-        contract: {
-          ...contractResult.rows[0],
-          contract_file_url: relativeFilePath ? `/${relativeFilePath}` : null,
-        },
+        contract: contractResult.rows[0],
       },
     });
   } catch (error) {
@@ -731,6 +746,8 @@ const updateContractFile = async (req, res) => {
 
     const oldFilePath = contractResult.rows[0].contract_file_path;
     const relativeFilePath = buildRelativeFilePath(file);
+    const originalFileName = decodeUploadedOriginalName(file);
+    const contractFileUrl = relativeFilePath ? `/${relativeFilePath}` : null;
 
     await client.query(
       `
@@ -738,14 +755,16 @@ const updateContractFile = async (req, res) => {
       SET
         contract_file_path = $1,
         contract_file_name = $2,
-        contract_file_mime_type = $3,
-        contract_file_size = $4,
+        contract_file_url = $3,
+        contract_file_mime_type = $4,
+        contract_file_size = $5,
         updated_at = now()
-      WHERE id = $5
+      WHERE id = $6
       `,
       [
         relativeFilePath,
-        file.originalname || null,
+        originalFileName,
+        contractFileUrl,
         file.mimetype || null,
         file.size || null,
         contractId,
@@ -768,7 +787,8 @@ const updateContractFile = async (req, res) => {
       data: {
         contract_id: contractId,
         contract_file_path: relativeFilePath,
-        contract_file_name: file.originalname || null,
+        contract_file_name: originalFileName,
+        contract_file_url: contractFileUrl,
       },
     });
   } catch (error) {
@@ -785,10 +805,143 @@ const updateContractFile = async (req, res) => {
   }
 };
 
+const getMyRoom = async (req, res) => {
+  try {
+    const userId = req.user?.id || req.user?.userId;
+    const dormId =
+      req.user?.dormId ||
+      req.user?.loginDormId ||
+      req.user?.login_dorm_id;
+
+    if (!userId) {
+      return res.status(401).json({
+        message: "ไม่พบ user ใน token",
+      });
+    }
+
+    const roomResult = await pool.query(
+      `
+      SELECT
+        rc.id AS contract_id,
+        rc.start_date,
+        rc.end_date,
+        rc.rent_amount,
+        rc.deposit_amount,
+        rc.water_rate,
+        rc.electric_rate,
+        rc.billing_due_day,
+        rc.status AS contract_status,
+        rc.note AS contract_note,
+        rc.contract_file_path,
+        rc.contract_file_name,
+        rc.contract_file_url,
+
+        r.id AS room_id,
+        r.room_number,
+        r.floor_no,
+        r.monthly_rent,
+        r.room_type,
+        r.status AS room_status,
+        r.tenant_name,
+
+        b.id AS building_id,
+        b.building_code,
+        b.display_name AS building_name
+      FROM public.rental_contracts rc
+      JOIN public.rooms r
+        ON r.id = rc.room_id
+      LEFT JOIN public.buildings b
+        ON b.id = r.building_id
+      WHERE rc.tenant_user_id = $1
+        ${dormId ? "AND rc.dorm_id = $2" : ""}
+        AND rc.status = 'active'
+      ORDER BY rc.created_at DESC
+      LIMIT 1
+      `,
+      dormId ? [userId, dormId] : [userId]
+    );
+
+    if (roomResult.rows.length === 0) {
+      return res.status(200).json({
+        message: "ยังไม่มีข้อมูลห้องสำหรับผู้เช่านี้",
+        data: null,
+      });
+    }
+
+    const room = roomResult.rows[0];
+
+    const furnitureResult = await pool.query(
+      `
+      SELECT
+        id,
+        item_name,
+        quantity,
+        condition_status,
+        usage_status
+      FROM public.furniture_items
+      WHERE room_id = $1
+        ${dormId ? "AND dorm_id = $2" : ""}
+        AND usage_status = 'active'
+      ORDER BY item_name ASC
+      `,
+      dormId ? [room.room_id, dormId] : [room.room_id]
+    );
+
+    return res.status(200).json({
+      message: "ดึงข้อมูลห้องของฉันสำเร็จ",
+      data: {
+        room: {
+          id: room.room_id,
+          roomNumber: room.room_number,
+          floor: room.floor_no,
+          buildingId: room.building_id,
+          buildingCode: room.building_code,
+          buildingName: room.building_name,
+          roomType: room.room_type,
+          monthlyRent: Number(room.monthly_rent || 0),
+          status: room.room_status,
+          tenantName: room.tenant_name,
+        },
+        contract: {
+          id: room.contract_id,
+          startDate: room.start_date,
+          endDate: room.end_date,
+          rentAmount: Number(room.rent_amount || 0),
+          depositAmount: Number(room.deposit_amount || 0),
+          waterRate: Number(room.water_rate || 0),
+          electricRate: Number(room.electric_rate || 0),
+          billingDueDay: room.billing_due_day,
+          status: room.contract_status,
+          note: room.contract_note,
+          filePath: room.contract_file_path,
+          fileName: room.contract_file_name,
+          fileUrl:
+            room.contract_file_url ||
+            (room.contract_file_path ? `/${room.contract_file_path}` : null),
+        },
+        furniture: furnitureResult.rows.map((item) => ({
+          id: item.id,
+          name: item.item_name,
+          quantity: Number(item.quantity || 0),
+          conditionStatus: item.condition_status,
+          usageStatus: item.usage_status,
+        })),
+      },
+    });
+  } catch (error) {
+    console.error("GET MY ROOM ERROR:", error);
+    return res.status(500).json({
+      message: "เกิดข้อผิดพลาดในการดึงข้อมูลห้องของฉัน",
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
   getTenants,
   getTenantFormOptions,
   createTenant,
   updateContractFile,
   endContract,
+  getMyRoom,
 };

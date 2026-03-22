@@ -5,6 +5,14 @@ const multer = require("multer");
 const uploadDir = path.join(__dirname, "../../uploads/contracts");
 fs.mkdirSync(uploadDir, { recursive: true });
 
+function decodeThaiFileName(name = "") {
+  try {
+    return Buffer.from(name, "latin1").toString("utf8");
+  } catch {
+    return name;
+  }
+}
+
 function sanitizeFileName(name) {
   return String(name || "")
     .trim()
@@ -17,26 +25,25 @@ const storage = multer.diskStorage({
     cb(null, uploadDir);
   },
   filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname || "").toLowerCase();
-    const baseName = path.basename(file.originalname || "contract", ext);
+    const decodedOriginalName = decodeThaiFileName(file.originalname || "contract");
+    const ext = path.extname(decodedOriginalName).toLowerCase();
+    const baseName = path.basename(decodedOriginalName, ext);
     const safeBaseName = sanitizeFileName(baseName) || "contract";
+
     cb(null, `${Date.now()}-${safeBaseName}${ext}`);
   },
 });
 
 function fileFilter(_req, file, cb) {
-  const allowed = [
-    "application/pdf",
-    "image/jpeg",
-    "image/png",
-    "image/jpg",
-  ];
+  const allowedMimeTypes = ["application/pdf"];
+  const decodedOriginalName = decodeThaiFileName(file.originalname || "");
+  const ext = path.extname(decodedOriginalName).toLowerCase();
 
-  if (!allowed.includes(file.mimetype)) {
-    return cb(new Error("อนุญาตเฉพาะไฟล์ PDF, JPG, JPEG, PNG"));
+  if (allowedMimeTypes.includes(file.mimetype) && ext === ".pdf") {
+    return cb(null, true);
   }
 
-  cb(null, true);
+  return cb(new Error("อนุญาตเฉพาะไฟล์ PDF เท่านั้น"));
 }
 
 const contractUpload = multer({
@@ -47,6 +54,4 @@ const contractUpload = multer({
   },
 });
 
-module.exports = {
-  contractUpload,
-};
+module.exports = contractUpload;

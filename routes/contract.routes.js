@@ -2,7 +2,7 @@ const express = require("express");
 const router = express.Router();
 
 const { verifyToken } = require("../middleware/auth.middleware");
-const { contractUpload } = require("../middleware/upload.middleware");
+const contractUpload = require("../middleware/upload.middleware");
 const {
   endContract,
   updateContractFile,
