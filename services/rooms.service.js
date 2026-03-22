@@ -462,6 +462,11 @@ async function getRoomDetailByOwnerId(ownerUserId, roomId) {
         move_out_date,
         ended_at,
         ended_reason,
+        contract_file_name,
+        contract_file_path,
+        contract_file_url,
+        contract_file_mime_type,
+        contract_file_size,
         created_at,
         updated_at
       FROM public.rental_contracts
