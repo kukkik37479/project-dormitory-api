@@ -65,13 +65,10 @@ async function register(req, res) {
     const normalizedDormName = String(dorm_name).trim();
     const normalizedDormNameEn = String(dorm_name_en).trim();
 
-    // ตอนนี้หน้า Sign ยังไม่ได้กรอกที่อยู่
-    // จึงตั้งค่า placeholder ไปก่อน แล้วค่อยให้หน้า "หอของฉัน" มาแก้จริงภายหลัง
     const placeholderAddress = "ยังไม่ได้ระบุที่อยู่";
 
     await client.query("BEGIN");
 
-    // email ห้ามซ้ำ
     const checkEmail = await client.query(
       `
       SELECT id
@@ -92,7 +89,6 @@ async function register(req, res) {
     const dormSlug = await generateUniqueDormSlug(client, normalizedDormNameEn);
     const passwordHash = await bcrypt.hash(password, 10);
 
-    // 1) สร้าง owner ก่อน โดยยังไม่ผูก login_dorm_id
     const userResult = await client.query(
       `
       INSERT INTO public.users (
@@ -130,7 +126,6 @@ async function register(req, res) {
 
     const owner = userResult.rows[0];
 
-    // 2) สร้างหอ
     const dormResult = await client.query(
       `
       INSERT INTO public.dorms (
@@ -167,7 +162,6 @@ async function register(req, res) {
 
     const dorm = dormResult.rows[0];
 
-    // 3) ผูก owner กลับเข้าหอ
     await client.query(
       `
       UPDATE public.users
@@ -238,10 +232,16 @@ async function login(req, res) {
           u.updated_at,
           d.id AS dorm_id,
           d.dorm_slug,
-          d.name AS dorm_name
+          d.name AS dorm_name,
+          d.name_en AS dorm_name_en,
+          up.prefix,
+          up.gender,
+          up.birth_date
         FROM public.users u
         JOIN public.dorms d
           ON d.id = u.login_dorm_id
+        LEFT JOIN public.user_profiles up
+          ON up.user_id = u.id
         WHERE lower(u.username) = lower($1)
           AND lower(d.dorm_slug) = lower($2)
         LIMIT 1
@@ -249,7 +249,6 @@ async function login(req, res) {
         [parsedUsername, parsedDormSlug]
       );
     } else {
-      // admin login แบบ plain username
       result = await pool.query(
         `
         SELECT
@@ -267,8 +266,14 @@ async function login(req, res) {
           u.updated_at,
           NULL::uuid AS dorm_id,
           NULL::varchar AS dorm_slug,
-          NULL::varchar AS dorm_name
+          NULL::varchar AS dorm_name,
+          NULL::varchar AS dorm_name_en,
+          up.prefix,
+          up.gender,
+          up.birth_date
         FROM public.users u
+        LEFT JOIN public.user_profiles up
+          ON up.user_id = u.id
         WHERE lower(u.username) = lower($1)
           AND u.role = 'admin'
         LIMIT 1
@@ -322,6 +327,9 @@ async function login(req, res) {
         full_name: user.full_name,
         phone: user.phone,
         avatar_url: user.avatar_url,
+        prefix: user.prefix,
+        gender: user.gender,
+        birth_date: user.birth_date,
         must_change_password: user.must_change_password,
         is_active: user.is_active,
         created_at: user.created_at,
@@ -329,6 +337,7 @@ async function login(req, res) {
         dorm_id: user.dorm_id,
         dorm_slug: user.dorm_slug,
         dorm_name: user.dorm_name,
+        dorm_name_en: user.dorm_name_en,
         login_identifier: user.dorm_slug
           ? `${user.username}@${user.dorm_slug}`
           : user.username,
@@ -364,10 +373,15 @@ async function me(req, res) {
         d.id AS dorm_id,
         d.dorm_slug,
         d.name AS dorm_name,
-        d.name_en AS dorm_name_en
+        d.name_en AS dorm_name_en,
+        up.prefix,
+        up.gender,
+        up.birth_date
       FROM public.users u
       LEFT JOIN public.dorms d
         ON d.id = u.login_dorm_id
+      LEFT JOIN public.user_profiles up
+        ON up.user_id = u.id
       WHERE u.id = $1
       LIMIT 1
       `,

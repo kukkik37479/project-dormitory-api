@@ -1,41 +1,64 @@
 const bcrypt = require("bcrypt");
 const { pool } = require("../config/db");
 
+const profileSelectSql = `
+  SELECT
+    u.id,
+    u.role,
+    u.email,
+    u.username,
+    u.full_name,
+    u.phone,
+    u.avatar_url,
+    u.is_active,
+    u.created_at,
+    u.updated_at,
+    u.login_dorm_id AS dorm_id,
+    d.dorm_slug,
+    d.name AS dorm_name,
+    d.name_en AS dorm_name_en,
+    up.prefix,
+    up.gender,
+    up.birth_date,
+
+    rc.id AS contract_id,
+    rc.status AS contract_status,
+
+    r.id AS room_id,
+    r.room_number,
+    r.floor_no,
+    r.room_type,
+
+    b.id AS building_id,
+    b.building_code,
+    b.display_name AS building_name
+  FROM public.users u
+  LEFT JOIN public.dorms d
+    ON d.id = u.login_dorm_id
+  LEFT JOIN public.user_profiles up
+    ON up.user_id = u.id
+  LEFT JOIN LATERAL (
+    SELECT rc1.*
+    FROM public.rental_contracts rc1
+    WHERE rc1.tenant_user_id = u.id
+      AND rc1.status = 'active'
+    ORDER BY rc1.created_at DESC
+    LIMIT 1
+  ) rc ON TRUE
+  LEFT JOIN public.rooms r
+    ON r.id = rc.room_id
+  LEFT JOIN public.buildings b
+    ON b.id = r.building_id
+  WHERE u.id = $1
+  LIMIT 1
+`;
+
 // GET /api/users/me
 async function getMyProfile(req, res) {
   try {
     const userId = req.user.userId;
 
-    const result = await pool.query(
-      `
-      SELECT
-        u.id,
-        u.role,
-        u.email,
-        u.username,
-        u.full_name,
-        u.phone,
-        u.avatar_url,
-        u.is_active,
-        u.created_at,
-        u.updated_at,
-        u.login_dorm_id AS dorm_id,
-        d.dorm_slug,
-        d.name AS dorm_name,
-        d.name_en AS dorm_name_en,
-        up.prefix,
-        up.gender,
-        up.birth_date
-      FROM public.users u
-      LEFT JOIN public.dorms d
-        ON d.id = u.login_dorm_id
-      LEFT JOIN public.user_profiles up
-        ON up.user_id = u.id
-      WHERE u.id = $1
-      LIMIT 1
-      `,
-      [userId]
-    );
+    const result = await pool.query(profileSelectSql, [userId]);
 
     if (result.rows.length === 0) {
       return res.status(404).json({
@@ -140,36 +163,7 @@ async function updateMyProfile(req, res) {
       ]
     );
 
-    const result = await client.query(
-      `
-      SELECT
-        u.id,
-        u.role,
-        u.email,
-        u.username,
-        u.full_name,
-        u.phone,
-        u.avatar_url,
-        u.is_active,
-        u.created_at,
-        u.updated_at,
-        u.login_dorm_id AS dorm_id,
-        d.dorm_slug,
-        d.name AS dorm_name,
-        d.name_en AS dorm_name_en,
-        up.prefix,
-        up.gender,
-        up.birth_date
-      FROM public.users u
-      LEFT JOIN public.dorms d
-        ON d.id = u.login_dorm_id
-      LEFT JOIN public.user_profiles up
-        ON up.user_id = u.id
-      WHERE u.id = $1
-      LIMIT 1
-      `,
-      [userId]
-    );
+    const result = await client.query(profileSelectSql, [userId]);
 
     await client.query("COMMIT");
 
