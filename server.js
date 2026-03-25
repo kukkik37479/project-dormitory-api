@@ -12,6 +12,9 @@ const roomsRoutes = require("./routes/rooms.routes");
 const contractRoutes = require("./routes/contract.routes");
 const chatRoutes = require("./routes/chat.routes");
 const announcementRoutes = require("./routes/announcement.routes");
+const furnitureRoutes = require("./routes/furniture.routes");
+const invoiceRoutes = require("./routes/invoices.routes");
+const bankAccountRoutes = require("./routes/bankAccounts.routes");
 
 dotenv.config();
 
@@ -40,6 +43,9 @@ app.use("/api/rooms", roomsRoutes);
 app.use("/api/contracts", contractRoutes);
 app.use("/api/chat", chatRoutes);
 app.use("/api/announcements", announcementRoutes);
+app.use("/api/furniture", furnitureRoutes);
+app.use("/api/invoices", invoiceRoutes);
+app.use("/api/bank-accounts", bankAccountRoutes);
 
 app.listen(PORT, async () => {
   try {
