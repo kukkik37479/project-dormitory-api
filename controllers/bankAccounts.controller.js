@@ -42,8 +42,7 @@ async function upsertDefaultBankAccount(req, res) {
     const bankAccount = await upsertDefaultBankAccountByOwnerId(
       req.user.userId,
       req.user.dormId,
-      req.body,
-      req.file || null
+      req.body
     );
 
     return res.json({

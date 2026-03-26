@@ -1,5 +1,3 @@
-const fs = require("fs");
-const path = require("path");
 const { pool } = require("../config/db");
 
 function createError(status, message) {
@@ -53,42 +51,19 @@ async function getDefaultBankAccountRow(dormId, client = pool) {
   return result.rows[0] || null;
 }
 
-function deleteLocalFileByUrl(fileUrl) {
-  if (!fileUrl || typeof fileUrl !== "string") return;
-  if (!fileUrl.startsWith("/uploads/")) return;
-
-  const uploadsRoot = path.resolve(path.join(__dirname, "../../uploads"));
-  const relativePath = fileUrl.replace(/^\/uploads\//, "");
-  const absolutePath = path.resolve(path.join(uploadsRoot, relativePath));
-
-  if (!absolutePath.startsWith(uploadsRoot)) return;
-  if (!fs.existsSync(absolutePath)) return;
-
-  try {
-    fs.unlinkSync(absolutePath);
-  } catch (error) {
-    console.error("deleteLocalFileByUrl error:", error);
-  }
-}
-
 async function getDefaultBankAccountByOwnerId(ownerUserId, dormId) {
   await ensureOwnerDorm(ownerUserId, dormId);
-
   return getDefaultBankAccountRow(dormId);
 }
 
 async function upsertDefaultBankAccountByOwnerId(
   ownerUserId,
   dormId,
-  body = {},
-  file = null
+  body = {}
 ) {
   await ensureOwnerDorm(ownerUserId, dormId);
 
   const client = await pool.connect();
-
-  let oldQrToDelete = null;
-  let newUploadedQrToDeleteOnFail = null;
 
   try {
     await client.query("BEGIN");
@@ -112,9 +87,15 @@ async function upsertDefaultBankAccountByOwnerId(
         ? normalizeNullableString(body.promptpay_id)
         : existing?.promptpay_id || null;
 
-    const nextQrImageUrl = file
-      ? `/uploads/payment-qr/${dormId}/${file.filename}`
-      : existing?.qr_image_url || null;
+    const nextQrImageUrl =
+      body.qr_image_url !== undefined
+        ? normalizeNullableString(body.qr_image_url)
+        : existing?.qr_image_url || null;
+
+    const nextQrPublicId =
+      body.qr_public_id !== undefined
+        ? normalizeNullableString(body.qr_public_id)
+        : existing?.qr_public_id || null;
 
     if (!nextBankName) {
       throw createError(400, "bank_name is required");
@@ -126,10 +107,6 @@ async function upsertDefaultBankAccountByOwnerId(
 
     if (!nextAccountNumber) {
       throw createError(400, "account_number is required");
-    }
-
-    if (file) {
-      newUploadedQrToDeleteOnFail = nextQrImageUrl;
     }
 
     let bankAccount;
@@ -144,9 +121,10 @@ async function upsertDefaultBankAccountByOwnerId(
             account_number = $3,
             promptpay_id = $4,
             qr_image_url = $5,
+            qr_public_id = $6,
             is_default = true,
             updated_at = now()
-          WHERE id = $6
+          WHERE id = $7
           RETURNING *
         `,
         [
@@ -155,15 +133,12 @@ async function upsertDefaultBankAccountByOwnerId(
           nextAccountNumber,
           nextPromptpayId,
           nextQrImageUrl,
+          nextQrPublicId,
           existing.id,
         ]
       );
 
       bankAccount = result.rows[0];
-
-      if (file && existing.qr_image_url && existing.qr_image_url !== nextQrImageUrl) {
-        oldQrToDelete = existing.qr_image_url;
-      }
     } else {
       const result = await client.query(
         `
@@ -174,9 +149,10 @@ async function upsertDefaultBankAccountByOwnerId(
             account_number,
             promptpay_id,
             qr_image_url,
+            qr_public_id,
             is_default
           )
-          VALUES ($1, $2, $3, $4, $5, $6, true)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, true)
           RETURNING *
         `,
         [
@@ -186,6 +162,7 @@ async function upsertDefaultBankAccountByOwnerId(
           nextAccountNumber,
           nextPromptpayId,
           nextQrImageUrl,
+          nextQrPublicId,
         ]
       );
 
@@ -193,19 +170,9 @@ async function upsertDefaultBankAccountByOwnerId(
     }
 
     await client.query("COMMIT");
-
-    if (oldQrToDelete) {
-      deleteLocalFileByUrl(oldQrToDelete);
-    }
-
     return bankAccount;
   } catch (error) {
     await client.query("ROLLBACK");
-
-    if (newUploadedQrToDeleteOnFail) {
-      deleteLocalFileByUrl(newUploadedQrToDeleteOnFail);
-    }
-
     throw error;
   } finally {
     client.release();

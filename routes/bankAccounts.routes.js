@@ -2,7 +2,6 @@ const express = require("express");
 const router = express.Router();
 
 const { verifyToken } = require("../middleware/auth.middleware");
-const { paymentQrUpload } = require("../middleware/paymentQrUpload.middleware");
 const {
   getDefaultBankAccount,
   upsertDefaultBankAccount,
@@ -11,10 +10,6 @@ const {
 router.use(verifyToken);
 
 router.get("/default", getDefaultBankAccount);
-router.put(
-  "/default",
-  paymentQrUpload.single("qr_image"),
-  upsertDefaultBankAccount
-);
+router.put("/default", upsertDefaultBankAccount);
 
 module.exports = router;
