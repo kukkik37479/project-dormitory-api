@@ -2,6 +2,7 @@ const {
   getMyDormProfileByOwnerId,
   updateMyDormProfileByOwnerId,
 } = require("../services/myDorm.service");
+const { pool } = require("../config/db");
 
 // GET /api/my-dorm/profile
 async function getMyDormProfile(req, res) {
@@ -75,7 +76,47 @@ async function updateMyDormProfile(req, res) {
   }
 }
 
+async function createAmenity(req, res) {
+  try {
+    const { label_th } = req.body;
+
+    if (!label_th) {
+      return res.status(400).json({ message: "label_th is required" });
+    }
+
+    const code = "custom_" + Date.now();
+
+    await pool.query(`
+      INSERT INTO public.amenity_master (code, label_th, sort_order, is_active)
+      VALUES ($1, $2, 999, true)
+    `, [code, label_th]);
+
+    return res.status(201).json({ code, label_th });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: "error creating amenity" });
+  }
+}
+
+async function deleteAmenity(req, res) {
+  try {
+    const { code } = req.params;
+
+    await pool.query(`DELETE FROM public.dorm_amenities WHERE amenity_code = $1`, [code]);
+    await pool.query(`DELETE FROM public.amenity_master WHERE code = $1`, [code]);
+
+    return res.status(200).json({ message: "deleted" });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: "error deleting amenity" });
+  }
+}
+
 module.exports = {
   getMyDormProfile,
   updateMyDormProfile,
+  getMyDormProfile,
+  updateMyDormProfile,
+  createAmenity,
+  deleteAmenity,
 };

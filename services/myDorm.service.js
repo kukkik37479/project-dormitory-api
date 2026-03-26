@@ -6,6 +6,16 @@ function toNullableNumber(value) {
   return Number.isNaN(num) ? null : num;
 }
 
+async function getAmenityOptions(client) {
+  const result = await client.query(`
+    SELECT code, label_th, sort_order, is_active
+    FROM public.amenity_master
+    WHERE is_active = true
+    ORDER BY sort_order ASC, code ASC
+  `);
+  return result.rows;
+}
+
 async function getRoomTypesByDormId(client, dormId) {
   const result = await client.query(
     `
@@ -134,6 +144,7 @@ async function getMyDormProfileByOwnerId(ownerUserId) {
 
     const roomTypes = await getRoomTypesByDormId(client, dorm.id);
     const amenities = await getAmenitiesByDormId(client, dorm.id);
+    const amenityOptions = await getAmenityOptions(client);
     const contactPhones = await getContactPhonesByDormId(client, dorm.id);
     const images = await getImagesByDormId(client, dorm.id);
 
@@ -141,6 +152,7 @@ async function getMyDormProfileByOwnerId(ownerUserId) {
       ...dorm,
       room_types: roomTypes,
       amenities,
+      amenity_options: amenityOptions,
       contact_phones: contactPhones,
       images,
     };
@@ -317,22 +329,15 @@ async function updateMyDormProfileByOwnerId(ownerUserId, payload) {
     }
 
     if (Array.isArray(amenities)) {
-      const allowedAmenityCodes = new Set([
-        "air_conditioner",
-        "car_parking",
-        "furniture",
-        "motorcycle_parking",
-        "water_heater",
-        "elevator",
-        "fan",
-        "swimming_pool",
-        "tv",
-        "gym",
-      ]);
+      const amenityOptions = await getAmenityOptions(client);
+      const allowedAmenityCodes = new Set(
+        amenityOptions.map((item) => item.code)
+      );
 
-      await client.query(`DELETE FROM public.dorm_amenities WHERE dorm_id = $1`, [
-        dorm.id,
-      ]);
+      await client.query(
+        `DELETE FROM public.dorm_amenities WHERE dorm_id = $1`,
+        [dorm.id]
+      );
 
       for (const amenityCode of amenities) {
         if (!amenityCode || !allowedAmenityCodes.has(amenityCode)) {
