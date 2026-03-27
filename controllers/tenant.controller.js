@@ -78,6 +78,8 @@ const getTenants = async (req, res) => {
           OR COALESCE(u.phone, '') ILIKE $${idx}
           OR COALESCE(u.username, '') ILIKE $${idx}
           OR COALESCE(r.room_number, '') ILIKE $${idx}
+          OR COALESCE(b.building_code, '') ILIKE $${idx}
+          OR COALESCE(b.display_name, '') ILIKE $${idx}
         )
       `;
     }
@@ -88,18 +90,19 @@ const getTenants = async (req, res) => {
       FROM public.tenant_profiles tp
       JOIN public.users u
         ON u.id = tp.user_id
-      LEFT JOIN LATERAL (
+      JOIN LATERAL (
         SELECT rc1.*
         FROM public.rental_contracts rc1
         WHERE rc1.tenant_user_id = u.id
           AND rc1.dorm_id = tp.dorm_id
-        ORDER BY
-          CASE WHEN rc1.status = 'active' THEN 0 ELSE 1 END,
-          rc1.created_at DESC
+          AND rc1.status = 'active'
+        ORDER BY rc1.created_at DESC
         LIMIT 1
       ) rc ON TRUE
       LEFT JOIN public.rooms r
         ON r.id = rc.room_id
+      LEFT JOIN public.buildings b
+        ON b.id = r.building_id
       ${whereSql}
       `,
       params
@@ -137,14 +140,13 @@ const getTenants = async (req, res) => {
       FROM public.tenant_profiles tp
       JOIN public.users u
         ON u.id = tp.user_id
-      LEFT JOIN LATERAL (
+      JOIN LATERAL (
         SELECT rc1.*
         FROM public.rental_contracts rc1
         WHERE rc1.tenant_user_id = u.id
           AND rc1.dorm_id = tp.dorm_id
-        ORDER BY
-          CASE WHEN rc1.status = 'active' THEN 0 ELSE 1 END,
-          rc1.created_at DESC
+          AND rc1.status = 'active'
+        ORDER BY rc1.created_at DESC
         LIMIT 1
       ) rc ON TRUE
       LEFT JOIN public.rooms r
@@ -629,6 +631,7 @@ const endContract = async (req, res) => {
       SELECT
         rc.id,
         rc.room_id,
+        rc.tenant_user_id,
         rc.status,
         rc.start_date,
         rc.end_date
@@ -664,7 +667,7 @@ const endContract = async (req, res) => {
         end_date = COALESCE($1::date, CURRENT_DATE),
         updated_at = now()
       WHERE id = $2
-      RETURNING id, room_id, status, start_date, end_date
+      RETURNING id, room_id, tenant_user_id, status, start_date, end_date
       `,
       [endDate, contractId]
     );
@@ -681,10 +684,21 @@ const endContract = async (req, res) => {
       [contract.room_id]
     );
 
+    await client.query(
+      `
+      UPDATE public.users
+      SET
+        is_active = false,
+        updated_at = now()
+      WHERE id = $1
+      `,
+      [contract.tenant_user_id]
+    );
+
     await client.query("COMMIT");
 
     return res.status(200).json({
-      message: "จบสัญญาเช่าสำเร็จ",
+      message: "จบสัญญาเช่าและปิดสิทธิ์ผู้เช่าสำเร็จ",
       data: updatedContract.rows[0],
     });
   } catch (error) {
