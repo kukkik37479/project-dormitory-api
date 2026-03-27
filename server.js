@@ -16,6 +16,7 @@ const furnitureRoutes = require("./routes/furniture.routes");
 const invoiceRoutes = require("./routes/invoices.routes");
 const bankAccountRoutes = require("./routes/bankAccounts.routes");
 const paymentRoutes = require("./routes/payments.routes");
+const repairRoutes = require("./routes/repair.routes");
 
 dotenv.config();
 
@@ -48,6 +49,7 @@ app.use("/api/furniture", furnitureRoutes);
 app.use("/api/invoices", invoiceRoutes);
 app.use("/api/bank-accounts", bankAccountRoutes);
 app.use("/api/payments", paymentRoutes);
+app.use("/api/repair-requests", repairRoutes);
 
 app.listen(PORT, async () => {
   try {
