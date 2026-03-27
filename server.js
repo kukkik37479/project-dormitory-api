@@ -17,6 +17,8 @@ const invoiceRoutes = require("./routes/invoices.routes");
 const bankAccountRoutes = require("./routes/bankAccounts.routes");
 const paymentRoutes = require("./routes/payments.routes");
 const repairRoutes = require("./routes/repair.routes");
+const publicRoutes = require("./routes/public.routes");
+const reviewRoutes = require("./routes/review.routes");
 
 dotenv.config();
 
@@ -27,7 +29,7 @@ app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
-app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
+app.use("/uploads", express.static(path.join(__dirname, "./uploads")));
 
 app.get("/", (req, res) => {
   res.json({ message: "Roomie API is running" });
@@ -37,6 +39,7 @@ app.get("/api/health", (req, res) => {
   res.json({ ok: true, message: "API ทำงานปกติ" });
 });
 
+app.use("/api/public", publicRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/my-dorm", myDormRoutes);
@@ -50,6 +53,7 @@ app.use("/api/invoices", invoiceRoutes);
 app.use("/api/bank-accounts", bankAccountRoutes);
 app.use("/api/payments", paymentRoutes);
 app.use("/api/repair-requests", repairRoutes);
+app.use("/api/reviews", reviewRoutes);
 
 app.listen(PORT, async () => {
   try {

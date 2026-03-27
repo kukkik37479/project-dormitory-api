@@ -51,6 +51,24 @@ function decodeUploadedOriginalName(file) {
   }
 }
 
+async function resolveDormIdFromIdentifier(client, identifier) {
+  const value = s(identifier);
+  if (!value) return null;
+
+  const result = await client.query(
+    `
+    SELECT id
+    FROM public.dorms
+    WHERE CAST(id AS text) = $1
+       OR dorm_slug = $1
+    LIMIT 1
+    `,
+    [value]
+  );
+
+  return result.rows[0]?.id || null;
+}
+
 const getTenants = async (req, res) => {
   try {
     const dormId = req.user?.dormId;
@@ -951,6 +969,261 @@ const getMyRoom = async (req, res) => {
   }
 };
 
+const getMyDormReview = async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    const userId = req.user?.id || req.user?.userId;
+    const role = req.user?.role;
+    const dormIdentifier = req.params.dormId;
+
+    if (!userId) {
+      return res.status(401).json({
+        message: "ไม่พบ user ใน token",
+      });
+    }
+
+    if (role !== "tenant") {
+      return res.status(403).json({
+        message: "เฉพาะผู้เช่าเท่านั้นที่ดูรีวิวของตัวเองได้",
+      });
+    }
+
+    const dormId = await resolveDormIdFromIdentifier(client, dormIdentifier);
+
+    if (!dormId) {
+      return res.status(404).json({
+        message: "ไม่พบหอพักนี้",
+      });
+    }
+
+    const contractResult = await client.query(
+      `
+      SELECT
+        rc.id,
+        rc.room_id
+      FROM public.rental_contracts rc
+      WHERE rc.tenant_user_id = $1
+        AND rc.dorm_id = $2
+        AND rc.status = 'active'
+      ORDER BY rc.created_at DESC
+      LIMIT 1
+      `,
+      [userId, dormId]
+    );
+
+    if (contractResult.rows.length === 0) {
+      return res.status(200).json({
+        message: "ผู้เช่าคนนี้ไม่มีสิทธิ์รีวิวหอนี้",
+        data: {
+          canReview: false,
+          room_id: null,
+          review: null,
+        },
+      });
+    }
+
+    const reviewResult = await client.query(
+      `
+      SELECT
+        id,
+        dorm_id,
+        room_id,
+        tenant_user_id,
+        rating,
+        comment,
+        status,
+        created_at,
+        updated_at
+      FROM public.reviews
+      WHERE dorm_id = $1
+        AND tenant_user_id = $2
+      ORDER BY created_at DESC
+      LIMIT 1
+      `,
+      [dormId, userId]
+    );
+
+    return res.status(200).json({
+      message: "ดึงรีวิวของฉันสำเร็จ",
+      data: {
+        canReview: true,
+        room_id: contractResult.rows[0].room_id,
+        review: reviewResult.rows[0] || null,
+      },
+    });
+  } catch (error) {
+    console.error("GET MY DORM REVIEW ERROR:", error);
+    return res.status(500).json({
+      message: "เกิดข้อผิดพลาดในการดึงรีวิวของฉัน",
+      error: error.message,
+    });
+  } finally {
+    client.release();
+  }
+};
+
+const upsertMyDormReview = async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    const userId = req.user?.id || req.user?.userId;
+    const role = req.user?.role;
+    const dormIdentifier = req.params.dormId;
+    const rating = Number(req.body.rating);
+    const comment = s(req.body.comment);
+
+    if (!userId) {
+      return res.status(401).json({
+        message: "ไม่พบ user ใน token",
+      });
+    }
+
+    if (role !== "tenant") {
+      return res.status(403).json({
+        message: "เฉพาะผู้เช่าเท่านั้นที่รีวิวได้",
+      });
+    }
+
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+      return res.status(400).json({
+        message: "คะแนนรีวิวต้องอยู่ระหว่าง 1 ถึง 5",
+      });
+    }
+
+    if (!comment) {
+      return res.status(400).json({
+        message: "กรุณากรอกข้อความรีวิว",
+      });
+    }
+
+    const dormId = await resolveDormIdFromIdentifier(client, dormIdentifier);
+
+    if (!dormId) {
+      return res.status(404).json({
+        message: "ไม่พบหอพักนี้",
+      });
+    }
+
+    await client.query("BEGIN");
+
+    const contractResult = await client.query(
+      `
+      SELECT
+        rc.id,
+        rc.room_id
+      FROM public.rental_contracts rc
+      WHERE rc.tenant_user_id = $1
+        AND rc.dorm_id = $2
+        AND rc.status = 'active'
+      ORDER BY rc.created_at DESC
+      LIMIT 1
+      `,
+      [userId, dormId]
+    );
+
+    if (contractResult.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({
+        message: "คุณไม่มีสิทธิ์รีวิวหอนี้",
+      });
+    }
+
+    const roomId = contractResult.rows[0].room_id;
+
+    const existingReviewResult = await client.query(
+      `
+      SELECT id
+      FROM public.reviews
+      WHERE dorm_id = $1
+        AND tenant_user_id = $2
+      ORDER BY created_at DESC
+      LIMIT 1
+      `,
+      [dormId, userId]
+    );
+
+    let savedReview;
+    let statusCode = 200;
+    let message = "อัปเดตรีวิวสำเร็จ";
+
+    if (existingReviewResult.rows.length > 0) {
+      const reviewId = existingReviewResult.rows[0].id;
+
+      const updateResult = await client.query(
+        `
+        UPDATE public.reviews
+        SET
+          room_id = $1,
+          rating = $2,
+          comment = $3,
+          status = 'visible',
+          updated_at = now()
+        WHERE id = $4
+        RETURNING
+          id,
+          dorm_id,
+          room_id,
+          tenant_user_id,
+          rating,
+          comment,
+          status,
+          created_at,
+          updated_at
+        `,
+        [roomId, rating, comment, reviewId]
+      );
+
+      savedReview = updateResult.rows[0];
+    } else {
+      const insertResult = await client.query(
+        `
+        INSERT INTO public.reviews (
+          dorm_id,
+          room_id,
+          tenant_user_id,
+          rating,
+          comment,
+          status
+        )
+        VALUES ($1, $2, $3, $4, $5, 'visible')
+        RETURNING
+          id,
+          dorm_id,
+          room_id,
+          tenant_user_id,
+          rating,
+          comment,
+          status,
+          created_at,
+          updated_at
+        `,
+        [dormId, roomId, userId, rating, comment]
+      );
+
+      savedReview = insertResult.rows[0];
+      statusCode = 201;
+      message = "ส่งรีวิวสำเร็จ";
+    }
+
+    await client.query("COMMIT");
+
+    return res.status(statusCode).json({
+      message,
+      data: savedReview,
+    });
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    console.error("UPSERT MY DORM REVIEW ERROR:", error);
+    return res.status(500).json({
+      message: "เกิดข้อผิดพลาดในการบันทึกรีวิว",
+      error: error.message,
+    });
+  } finally {
+    client.release();
+  }
+};
+
 module.exports = {
   getTenants,
   getTenantFormOptions,
@@ -958,4 +1231,6 @@ module.exports = {
   updateContractFile,
   endContract,
   getMyRoom,
+  getMyDormReview,
+  upsertMyDormReview,
 };
