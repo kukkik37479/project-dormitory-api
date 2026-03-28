@@ -36,10 +36,37 @@ function removeUploadedFile(file) {
   } catch (_error) {}
 }
 
+function normalizeStoredContractPath(filePath) {
+  const normalized = String(filePath || "")
+    .replace(/\\/g, "/")
+    .replace(/^\/+/, "");
+
+  if (!normalized) return null;
+
+  if (normalized.startsWith("src/uploads/")) {
+    return normalized.replace(/^src\/uploads\//, "uploads/");
+  }
+
+  return normalized;
+}
+
 function buildRelativeFilePath(file) {
   if (!file?.path) return null;
   const projectRoot = path.join(__dirname, "../../");
-  return path.relative(projectRoot, file.path).replace(/\\/g, "/");
+  const relativePath = path.relative(projectRoot, file.path).replace(/\\/g, "/");
+  return normalizeStoredContractPath(relativePath);
+}
+
+function buildPublicFileUrl(filePath) {
+  const normalizedPath = normalizeStoredContractPath(filePath);
+  return normalizedPath ? `/${normalizedPath}` : null;
+}
+
+function getAbsoluteStoredFilePath(filePath) {
+  const normalizedPath = normalizeStoredContractPath(filePath);
+  if (!normalizedPath) return null;
+  const projectRoot = path.join(__dirname, "../../");
+  return path.join(projectRoot, normalizedPath);
 }
 
 function decodeUploadedOriginalName(file) {
@@ -183,9 +210,19 @@ const getTenants = async (req, res) => {
       dataParams
     );
 
+    const rows = result.rows.map((row) => {
+      const normalizedPath = normalizeStoredContractPath(row.contract_file_path);
+
+      return {
+        ...row,
+        contract_file_path: normalizedPath,
+        contract_file_url: buildPublicFileUrl(normalizedPath),
+      };
+    });
+
     return res.status(200).json({
       message: "ดึงรายชื่อผู้เช่าสำเร็จ",
-      data: result.rows,
+      data: rows,
       meta: {
         page,
         limit,
@@ -499,7 +536,7 @@ const createTenant = async (req, res) => {
 
     const relativeFilePath = buildRelativeFilePath(file);
     const originalFileName = decodeUploadedOriginalName(file);
-    const contractFileUrl = relativeFilePath ? `/${relativeFilePath}` : null;
+    const contractFileUrl = buildPublicFileUrl(relativeFilePath);
 
     const finalRentAmount =
       req.body.rent_amount === undefined || req.body.rent_amount === ""
@@ -603,7 +640,15 @@ const createTenant = async (req, res) => {
       data: {
         tenant: tenantUser,
         tenant_profile: tenantProfileResult.rows[0],
-        contract: contractResult.rows[0],
+        contract: {
+          ...contractResult.rows[0],
+          contract_file_path: normalizeStoredContractPath(
+            contractResult.rows[0].contract_file_path
+          ),
+          contract_file_url: buildPublicFileUrl(
+            contractResult.rows[0].contract_file_path
+          ),
+        },
       },
     });
   } catch (error) {
@@ -779,7 +824,7 @@ const updateContractFile = async (req, res) => {
     const oldFilePath = contractResult.rows[0].contract_file_path;
     const relativeFilePath = buildRelativeFilePath(file);
     const originalFileName = decodeUploadedOriginalName(file);
-    const contractFileUrl = relativeFilePath ? `/${relativeFilePath}` : null;
+    const contractFileUrl = buildPublicFileUrl(relativeFilePath);
 
     await client.query(
       `
@@ -807,8 +852,8 @@ const updateContractFile = async (req, res) => {
 
     if (oldFilePath) {
       try {
-        const oldAbsolutePath = path.join(__dirname, "../../", oldFilePath);
-        if (fs.existsSync(oldAbsolutePath)) {
+        const oldAbsolutePath = getAbsoluteStoredFilePath(oldFilePath);
+        if (oldAbsolutePath && fs.existsSync(oldAbsolutePath)) {
           fs.unlinkSync(oldAbsolutePath);
         }
       } catch (_error) {}
@@ -919,6 +964,11 @@ const getMyRoom = async (req, res) => {
       dormId ? [room.room_id, dormId] : [room.room_id]
     );
 
+    const normalizedContractPath = normalizeStoredContractPath(
+      room.contract_file_path || room.contract_file_url
+    );
+    const normalizedContractUrl = buildPublicFileUrl(normalizedContractPath);
+
     return res.status(200).json({
       message: "ดึงข้อมูลห้องของฉันสำเร็จ",
       data: {
@@ -945,11 +995,9 @@ const getMyRoom = async (req, res) => {
           billingDueDay: room.billing_due_day,
           status: room.contract_status,
           note: room.contract_note,
-          filePath: room.contract_file_path,
+          filePath: normalizedContractPath,
           fileName: room.contract_file_name,
-          fileUrl:
-            room.contract_file_url ||
-            (room.contract_file_path ? `/${room.contract_file_path}` : null),
+          fileUrl: normalizedContractUrl,
         },
         furniture: furnitureResult.rows.map((item) => ({
           id: item.id,
