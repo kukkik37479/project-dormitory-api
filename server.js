@@ -19,6 +19,7 @@ const paymentRoutes = require("./routes/payments.routes");
 const repairRoutes = require("./routes/repair.routes");
 const publicRoutes = require("./routes/public.routes");
 const reviewRoutes = require("./routes/review.routes");
+const dashboardRoutes = require("./routes/dashboard.routes");
 
 dotenv.config();
 
@@ -54,6 +55,7 @@ app.use("/api/bank-accounts", bankAccountRoutes);
 app.use("/api/payments", paymentRoutes);
 app.use("/api/repair-requests", repairRoutes);
 app.use("/api/reviews", reviewRoutes);
+app.use("/api/dashboard", dashboardRoutes);
 
 app.listen(PORT, async () => {
   try {
