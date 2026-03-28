@@ -62,6 +62,69 @@ function calcMonthsUsed(purchaseDate) {
   return Math.max(months, 0);
 }
 
+function mapFurnitureRepairHistoryRow(row) {
+  return {
+    id: row.id,
+    furnitureItemId: row.furniture_item_id,
+    title: row.title,
+    description: row.description,
+    category: row.category,
+    priority: row.priority,
+    status: row.status,
+    ownerNote: row.owner_note,
+    requestedAt: row.requested_at,
+    completedAt: row.completed_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    beforeImageUrl: row.before_image_url || null,
+    afterImageUrl: row.after_image_url || null,
+  };
+}
+
+function buildRepairSummary(repairHistory = []) {
+  const totalRepairs = repairHistory.length;
+  const openStatuses = new Set(["pending", "in_progress", "waiting_parts"]);
+
+  const openRepairs = repairHistory.filter((item) =>
+    openStatuses.has(item.status)
+  ).length;
+
+  const completedRepairs = repairHistory.filter(
+    (item) => item.status === "completed"
+  ).length;
+
+  const cancelledRepairs = repairHistory.filter(
+    (item) => item.status === "cancelled"
+  ).length;
+
+  const sortedByRequestedAt = [...repairHistory].sort((a, b) => {
+    const timeA = new Date(a.requestedAt || a.createdAt || 0).getTime();
+    const timeB = new Date(b.requestedAt || b.createdAt || 0).getTime();
+    return timeB - timeA;
+  });
+
+  const sortedCompleted = repairHistory
+    .filter((item) => item.completedAt)
+    .sort((a, b) => {
+      const timeA = new Date(a.completedAt || 0).getTime();
+      const timeB = new Date(b.completedAt || 0).getTime();
+      return timeB - timeA;
+    });
+
+  const latestRepair = sortedByRequestedAt[0] || null;
+
+  return {
+    totalRepairs,
+    openRepairs,
+    completedRepairs,
+    cancelledRepairs,
+    hasOpenRepair: openRepairs > 0,
+    lastReportedAt: latestRepair?.requestedAt || latestRepair?.createdAt || null,
+    lastCompletedAt: sortedCompleted[0]?.completedAt || null,
+    latestStatus: latestRepair?.status || null,
+  };
+}
+
 function mapFurnitureItemRow(item) {
   const monthsUsed = calcMonthsUsed(item.purchase_date);
   const lifespanMonths =
@@ -73,6 +136,15 @@ function mapFurnitureItemRow(item) {
     lifespanMonths === null || monthsUsed === null
       ? null
       : Math.max(lifespanMonths - monthsUsed, 0);
+
+  const repairHistory = Array.isArray(item.repair_history)
+    ? item.repair_history
+    : [];
+
+  const repairSummary =
+    item.repair_summary && typeof item.repair_summary === "object"
+      ? item.repair_summary
+      : buildRepairSummary(repairHistory);
 
   return {
     id: item.id,
@@ -101,6 +173,8 @@ function mapFurnitureItemRow(item) {
     remainingLifespanMonths,
     createdAt: item.created_at,
     updatedAt: item.updated_at,
+    repairSummary,
+    repairHistory,
   };
 }
 
@@ -341,6 +415,92 @@ async function getRoomFurnitureItemsByOwnerId(ownerUserId, roomId) {
       [roomId, dorm.id]
     );
 
+    const itemRows = itemsResult.rows;
+    const itemIds = itemRows.map((item) => item.id);
+
+    let repairRows = [];
+
+    if (itemIds.length > 0) {
+      const repairResult = await client.query(
+        `
+        SELECT
+          rr.id,
+          COALESCE(rr.furniture_item_id, rr.furniture_id) AS furniture_item_id,
+          rr.title,
+          rr.description,
+          rr.category,
+          rr.priority,
+          rr.status,
+          rr.owner_note,
+          rr.requested_at,
+          rr.completed_at,
+          rr.created_at,
+          rr.updated_at,
+          (
+            SELECT rra.file_url
+            FROM public.repair_request_attachments rra
+            WHERE rra.repair_request_id = rr.id
+              AND rra.label = 'before'
+            ORDER BY rra.created_at ASC
+            LIMIT 1
+          ) AS before_image_url,
+          (
+            SELECT rra.file_url
+            FROM public.repair_request_attachments rra
+            WHERE rra.repair_request_id = rr.id
+              AND rra.label = 'after'
+            ORDER BY rra.created_at ASC
+            LIMIT 1
+          ) AS after_image_url
+        FROM public.repair_requests rr
+        WHERE rr.dorm_id = $1
+          AND rr.room_id = $2
+          AND COALESCE(rr.furniture_item_id, rr.furniture_id) = ANY($3::uuid[])
+        ORDER BY
+          rr.requested_at DESC,
+          rr.created_at DESC,
+          rr.id DESC
+        `,
+        [dorm.id, roomId, itemIds]
+      );
+
+      repairRows = repairResult.rows;
+    }
+
+    const repairsByItemId = new Map();
+
+    for (const row of repairRows) {
+      const furnitureItemId = row.furniture_item_id;
+      if (!furnitureItemId) continue;
+
+      const repairItem = mapFurnitureRepairHistoryRow(row);
+
+      if (!repairsByItemId.has(furnitureItemId)) {
+        repairsByItemId.set(furnitureItemId, []);
+      }
+
+      repairsByItemId.get(furnitureItemId).push(repairItem);
+    }
+
+    const items = itemRows.map((row) => {
+      const repairHistory = repairsByItemId.get(row.id) || [];
+      const repairSummary = buildRepairSummary(repairHistory);
+
+      return mapFurnitureItemRow({
+        ...row,
+        repair_history: repairHistory,
+        repair_summary: repairSummary,
+      });
+    });
+
+    const roomRepairHistory = repairRows.map(mapFurnitureRepairHistoryRow);
+    const roomCompletedRepairHistory = roomRepairHistory.filter(
+      (item) => item.status === "completed"
+    );
+    const roomOpenRepairHistory = roomRepairHistory.filter((item) =>
+      ["pending", "in_progress", "waiting_parts"].includes(item.status)
+    );
+
     return {
       room: {
         id: room.id,
@@ -354,7 +514,16 @@ async function getRoomFurnitureItemsByOwnerId(ownerUserId, roomId) {
         tenantName: room.tenant_name,
         roomLabel: `ห้อง ${room.room_number} ${room.building_name} ชั้น ${room.floor_no}`,
       },
-      items: itemsResult.rows.map(mapFurnitureItemRow),
+      summary: {
+        totalFurnitureItems: items.length,
+        totalRepairRequests: roomRepairHistory.length,
+        openRepairRequests: roomOpenRepairHistory.length,
+        completedRepairRequests: roomCompletedRepairHistory.length,
+      },
+      items,
+      roomRepairHistory,
+      roomCompletedRepairHistory,
+      roomOpenRepairHistory,
     };
   } finally {
     client.release();
