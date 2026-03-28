@@ -81,6 +81,8 @@ function mapVacantRoom(row) {
     room_type: row.room_type,
     status: row.status,
     note: row.note,
+    published_at: row.published_at || null,
+    vacancy_announcement_id: row.vacancy_announcement_id || null,
   };
 }
 
@@ -238,10 +240,14 @@ async function getDormVacantRoomsByDormId(client, dormId, limit = 50) {
       r.monthly_rent,
       r.room_type,
       r.status,
-      r.note
-    FROM public.rooms r
+      va.note,
+      va.published_at,
+      va.id AS vacancy_announcement_id
+    FROM public.vacancy_announcements va
+    INNER JOIN public.rooms r
+      ON r.id = va.room_id
     INNER JOIN public.dorms d
-      ON d.id = r.dorm_id
+      ON d.id = va.dorm_id
     LEFT JOIN public.buildings b
       ON b.id = r.building_id
     LEFT JOIN LATERAL (
@@ -251,10 +257,15 @@ async function getDormVacantRoomsByDormId(client, dormId, limit = 50) {
       ORDER BY di.is_cover DESC, di.sort_order ASC, di.created_at ASC
       LIMIT 1
     ) cover ON true
-    WHERE r.dorm_id = $1
+    WHERE va.dorm_id = $1
+      AND va.status = 'published'
       AND d.status = 'active'
       AND r.status = 'vacant'
-    ORDER BY r.monthly_rent ASC, r.floor_no ASC, r.room_number ASC
+    ORDER BY
+      va.published_at DESC NULLS LAST,
+      r.monthly_rent ASC,
+      r.floor_no ASC,
+      r.room_number ASC
     LIMIT $2
     `,
     [dormId, safeLimit]
@@ -335,9 +346,11 @@ async function getPublicHomeData(params = {}) {
              )
           )::int AS total_dorms,
           (SELECT COUNT(*)
-           FROM public.rooms r
-           INNER JOIN public.dorms d ON d.id = r.dorm_id
-           WHERE d.status = 'active'
+           FROM public.vacancy_announcements va
+           INNER JOIN public.rooms r ON r.id = va.room_id
+           INNER JOIN public.dorms d ON d.id = va.dorm_id
+           WHERE va.status = 'published'
+             AND d.status = 'active'
              AND r.status = 'vacant'
              AND (
                $1 = ''
@@ -373,7 +386,7 @@ async function getPublicHomeData(params = {}) {
           d.created_at,
           d.updated_at,
           COALESCE(room_stats.total_rooms, 0)::int AS total_rooms,
-          COALESCE(room_stats.vacant_rooms, 0)::int AS vacant_rooms,
+          COALESCE(vacancy_stats.vacant_rooms, 0)::int AS vacant_rooms,
           price_stats.price_min,
           price_stats.price_max,
           cover.image_url AS cover_image
@@ -381,12 +394,23 @@ async function getPublicHomeData(params = {}) {
         LEFT JOIN (
           SELECT
             dorm_id,
-            COUNT(*)::int AS total_rooms,
-            COUNT(*) FILTER (WHERE status = 'vacant')::int AS vacant_rooms
+            COUNT(*)::int AS total_rooms
           FROM public.rooms
           GROUP BY dorm_id
         ) room_stats
           ON room_stats.dorm_id = d.id
+        LEFT JOIN (
+          SELECT
+            va.dorm_id,
+            COUNT(*)::int AS vacant_rooms
+          FROM public.vacancy_announcements va
+          INNER JOIN public.rooms r
+            ON r.id = va.room_id
+          WHERE va.status = 'published'
+            AND r.status = 'vacant'
+          GROUP BY va.dorm_id
+        ) vacancy_stats
+          ON vacancy_stats.dorm_id = d.id
         LEFT JOIN (
           SELECT
             dorm_id,
@@ -436,10 +460,14 @@ async function getPublicHomeData(params = {}) {
           r.monthly_rent,
           r.room_type,
           r.status,
-          r.note
-        FROM public.rooms r
+          va.note,
+          va.published_at,
+          va.id AS vacancy_announcement_id
+        FROM public.vacancy_announcements va
+        INNER JOIN public.rooms r
+          ON r.id = va.room_id
         INNER JOIN public.dorms d
-          ON d.id = r.dorm_id
+          ON d.id = va.dorm_id
         LEFT JOIN public.buildings b
           ON b.id = r.building_id
         LEFT JOIN LATERAL (
@@ -449,7 +477,8 @@ async function getPublicHomeData(params = {}) {
           ORDER BY di.is_cover DESC, di.sort_order ASC, di.created_at ASC
           LIMIT 1
         ) cover ON true
-        WHERE d.status = 'active'
+        WHERE va.status = 'published'
+          AND d.status = 'active'
           AND r.status = 'vacant'
           AND (
             $1 = ''
@@ -459,7 +488,12 @@ async function getPublicHomeData(params = {}) {
             OR COALESCE(r.room_number, '') ILIKE $2
             OR COALESCE(r.room_type, '') ILIKE $2
           )
-        ORDER BY r.monthly_rent ASC, d.updated_at DESC, r.floor_no ASC, r.room_number ASC
+        ORDER BY
+          va.published_at DESC NULLS LAST,
+          r.monthly_rent ASC,
+          d.updated_at DESC,
+          r.floor_no ASC,
+          r.room_number ASC
         LIMIT $3 OFFSET $4
         `,
         [search, searchLike, vacantLimit, vacantOffset]
@@ -526,7 +560,7 @@ async function getPublicDormDetailByIdentifier(identifier) {
         d.created_at,
         d.updated_at,
         COALESCE(room_stats.total_rooms, 0)::int AS total_rooms,
-        COALESCE(room_stats.vacant_rooms, 0)::int AS vacant_rooms,
+        COALESCE(vacancy_stats.vacant_rooms, 0)::int AS vacant_rooms,
         price_stats.price_min,
         price_stats.price_max,
         cover.image_url AS cover_image
@@ -534,12 +568,23 @@ async function getPublicDormDetailByIdentifier(identifier) {
       LEFT JOIN (
         SELECT
           dorm_id,
-          COUNT(*)::int AS total_rooms,
-          COUNT(*) FILTER (WHERE status = 'vacant')::int AS vacant_rooms
+          COUNT(*)::int AS total_rooms
         FROM public.rooms
         GROUP BY dorm_id
       ) room_stats
         ON room_stats.dorm_id = d.id
+      LEFT JOIN (
+        SELECT
+          va.dorm_id,
+          COUNT(*)::int AS vacant_rooms
+        FROM public.vacancy_announcements va
+        INNER JOIN public.rooms r
+          ON r.id = va.room_id
+        WHERE va.status = 'published'
+          AND r.status = 'vacant'
+        GROUP BY va.dorm_id
+      ) vacancy_stats
+        ON vacancy_stats.dorm_id = d.id
       LEFT JOIN (
         SELECT
           dorm_id,

@@ -4,6 +4,7 @@ const {
   getVacantRoomsByOwnerId,
   createBuildingByOwnerId,
   createRoomByOwnerId,
+  updateRoomStatusByOwnerId,
   getRoomDetailByOwnerId,
 } = require("../services/rooms.service");
 
@@ -105,6 +106,28 @@ async function createRoom(req, res) {
   }
 }
 
+async function updateRoomStatus(req, res) {
+  try {
+    if (!ensureOwner(req, res)) return;
+
+    const room = await updateRoomStatusByOwnerId(
+      req.user.userId,
+      req.params.roomId,
+      req.body || {}
+    );
+
+    return res.json({
+      message: "Room status updated successfully",
+      room,
+    });
+  } catch (error) {
+    console.error("updateRoomStatus error:", error);
+    return res.status(error.status || 500).json({
+      message: error.message || "Internal server error",
+    });
+  }
+}
+
 async function getRoomDetail(req, res) {
   try {
     if (!ensureOwner(req, res)) return;
@@ -132,5 +155,6 @@ module.exports = {
   getVacantRooms,
   createBuilding,
   createRoom,
+  updateRoomStatus,
   getRoomDetail,
 };

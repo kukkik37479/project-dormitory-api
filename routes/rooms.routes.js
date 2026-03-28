@@ -7,6 +7,7 @@ const {
   getVacantRooms,
   createBuilding,
   createRoom,
+  updateRoomStatus,
   getRoomDetail,
 } = require("../controllers/rooms.controller");
 
@@ -19,6 +20,7 @@ router.get("/vacant", getVacantRooms);
 router.get("/", getRooms);
 router.post("/buildings", createBuilding);
 router.post("/", createRoom);
+router.patch("/:roomId/status", updateRoomStatus);
 router.get("/:roomId", getRoomDetail);
 
 module.exports = router;

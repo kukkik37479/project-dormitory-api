@@ -377,6 +377,117 @@ async function createRoomByOwnerId(ownerUserId, payload) {
   }
 }
 
+async function updateRoomStatusByOwnerId(ownerUserId, roomId, payload = {}) {
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const dorm = await getOwnerDorm(client, ownerUserId);
+    const safeRoomId = String(roomId || "").trim();
+    const nextStatus = String(payload.status || "")
+      .trim()
+      .toLowerCase();
+
+    if (!safeRoomId) {
+      throw createError(400, "กรุณาระบุ roomId");
+    }
+
+    const allowedTargetStatuses = new Set(["vacant", "maintenance"]);
+    if (!allowedTargetStatuses.has(nextStatus)) {
+      throw createError(
+        400,
+        "สถานะที่อนุญาตให้อัปเดตได้จากหน้านี้มีเฉพาะ vacant และ maintenance"
+      );
+    }
+
+    const roomResult = await client.query(
+      `
+      SELECT
+        r.id,
+        r.dorm_id,
+        r.building_id,
+        r.room_number,
+        r.floor_no,
+        r.monthly_rent,
+        r.room_type,
+        r.status,
+        r.note,
+        r.tenant_name,
+        r.created_at,
+        r.updated_at,
+        b.building_code,
+        b.display_name AS building_display_name,
+        b.sort_order AS building_sort_order
+      FROM public.rooms r
+      INNER JOIN public.buildings b
+        ON b.id = r.building_id
+      WHERE r.id = $1
+        AND r.dorm_id = $2
+      LIMIT 1
+      `,
+      [safeRoomId, dorm.id]
+    );
+
+    const room = roomResult.rows[0];
+
+    if (!room) {
+      throw createError(404, "ไม่พบห้องนี้ หรือห้องนี้ไม่ได้อยู่ในหอของคุณ");
+    }
+
+    if (room.status === "occupied") {
+      throw createError(
+        400,
+        "ห้องที่มีผู้เช่าอยู่ไม่สามารถเปลี่ยนสถานะจากหน้านี้ได้"
+      );
+    }
+
+    if (room.status === nextStatus) {
+      await client.query("COMMIT");
+      return room;
+    }
+
+    const updateResult = await client.query(
+      `
+      UPDATE public.rooms
+      SET
+        status = $1,
+        updated_at = now()
+      WHERE id = $2
+        AND dorm_id = $3
+      RETURNING
+        id,
+        dorm_id,
+        building_id,
+        room_number,
+        floor_no,
+        monthly_rent,
+        room_type,
+        status,
+        note,
+        tenant_name,
+        created_at,
+        updated_at
+      `,
+      [nextStatus, safeRoomId, dorm.id]
+    );
+
+    await client.query("COMMIT");
+
+    return {
+      ...updateResult.rows[0],
+      building_code: room.building_code,
+      building_display_name: room.building_display_name,
+      building_sort_order: room.building_sort_order,
+    };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function getRoomDetailByOwnerId(ownerUserId, roomId) {
   const client = await pool.connect();
 
@@ -493,5 +604,6 @@ module.exports = {
   getVacantRoomsByOwnerId,
   createBuildingByOwnerId,
   createRoomByOwnerId,
+  updateRoomStatusByOwnerId,
   getRoomDetailByOwnerId,
 };
