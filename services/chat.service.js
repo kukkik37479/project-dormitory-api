@@ -10,12 +10,18 @@ async function getAccessibleConversation(client, conversationId, userId, role) {
     SELECT
       cc.*
     FROM public.chat_conversations cc
+    INNER JOIN public.users tenant_user
+      ON tenant_user.id = cc.tenant_user_id
+    INNER JOIN public.rental_contracts rc
+      ON rc.id = cc.rental_contract_id
     WHERE cc.id = $1
       AND (
         ($2 = 'owner' AND cc.owner_user_id = $3)
         OR
         ($2 = 'tenant' AND cc.tenant_user_id = $3)
       )
+      AND COALESCE(tenant_user.is_active, true) = true
+      AND rc.status = 'active'
     LIMIT 1
     `,
     [conversationId, role, userId]
@@ -39,8 +45,11 @@ async function ensureConversationForTenantUser(tenantUserId) {
       FROM public.rental_contracts rc
       INNER JOIN public.dorms d
         ON d.id = rc.dorm_id
+      INNER JOIN public.users tenant_user
+        ON tenant_user.id = rc.tenant_user_id
       WHERE rc.tenant_user_id = $1
         AND rc.status = 'active'
+        AND COALESCE(tenant_user.is_active, true) = true
       ORDER BY rc.created_at DESC
       LIMIT 1
       `,
@@ -127,8 +136,11 @@ async function ensureOwnerConversations(ownerUserId) {
       FROM public.rental_contracts rc
       INNER JOIN public.dorms d
         ON d.id = rc.dorm_id
+      INNER JOIN public.users tenant_user
+        ON tenant_user.id = rc.tenant_user_id
       WHERE d.owner_user_id = $1
         AND rc.status = 'active'
+        AND COALESCE(tenant_user.is_active, true) = true
       `,
       [ownerUserId]
     );
@@ -234,6 +246,13 @@ async function getOwnerConversations(ownerUserId) {
       LEFT JOIN public.buildings b
         ON b.id = r.building_id
       WHERE cc.owner_user_id = $1
+        AND COALESCE(u.is_active, true) = true
+        AND EXISTS (
+          SELECT 1
+          FROM public.rental_contracts rc
+          WHERE rc.id = cc.rental_contract_id
+            AND rc.status = 'active'
+        )
       ORDER BY cc.last_message_at DESC NULLS LAST, cc.created_at DESC
       `,
       [ownerUserId]
@@ -292,6 +311,18 @@ async function getTenantConversations(tenantUserId) {
       LEFT JOIN public.buildings b
         ON b.id = r.building_id
       WHERE cc.tenant_user_id = $1
+        AND EXISTS (
+          SELECT 1
+          FROM public.users tenant_user
+          WHERE tenant_user.id = cc.tenant_user_id
+            AND COALESCE(tenant_user.is_active, true) = true
+        )
+        AND EXISTS (
+          SELECT 1
+          FROM public.rental_contracts rc
+          WHERE rc.id = cc.rental_contract_id
+            AND rc.status = 'active'
+        )
       ORDER BY cc.last_message_at DESC NULLS LAST, cc.created_at DESC
       `,
       [tenantUserId]

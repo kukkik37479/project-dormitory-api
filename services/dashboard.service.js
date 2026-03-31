@@ -12,6 +12,21 @@ function toNumber(value) {
   return Number.isFinite(num) ? num : 0;
 }
 
+function getResolvedInvoiceStatusSql(
+  statusColumn = "status",
+  dueDateColumn = "due_date"
+) {
+  return `
+    CASE
+      WHEN ${statusColumn} = 'unpaid'
+       AND ${dueDateColumn} IS NOT NULL
+       AND ${dueDateColumn} < CURRENT_DATE
+      THEN 'overdue'
+      ELSE ${statusColumn}
+    END
+  `;
+}
+
 async function getTableColumns(tableName) {
   if (tableColumnsCache[tableName]) {
     return tableColumnsCache[tableName];
@@ -84,6 +99,7 @@ function normalizeBuildingSummaryRows(rows) {
 
 async function getOverview({ dormId, month }) {
   const monthDate = monthToDate(month);
+  const resolvedStatusSql = getResolvedInvoiceStatusSql("i.status", "i.due_date");
 
   const roomSummaryQuery = pool.query(
     `
@@ -134,10 +150,12 @@ async function getOverview({ dormId, month }) {
   const financeSummaryQuery = pool.query(
     `
       WITH invoice_base AS (
-        SELECT *
-        FROM public.invoices
-        WHERE dorm_id = $1
-          AND DATE_TRUNC('month', billing_month) = DATE_TRUNC('month', $2::date)
+        SELECT
+          i.*,
+          ${resolvedStatusSql} AS resolved_status
+        FROM public.invoices i
+        WHERE i.dorm_id = $1
+          AND DATE_TRUNC('month', i.billing_month) = DATE_TRUNC('month', $2::date)
       ),
       payment_base AS (
         SELECT p.*
@@ -147,20 +165,26 @@ async function getOverview({ dormId, month }) {
       SELECT
         COUNT(*)::int AS total_invoices,
         COALESCE(SUM(total_amount), 0)::double precision AS total_billed_amount,
-        COUNT(*) FILTER (WHERE status = 'paid')::int AS paid_invoice_count,
-        COUNT(*) FILTER (WHERE status = 'pending_review')::int AS pending_review_invoice_count,
-        COUNT(*) FILTER (WHERE status IN ('unpaid', 'overdue'))::int AS outstanding_invoice_count,
-        COUNT(*) FILTER (WHERE status = 'overdue')::int AS overdue_invoice_count,
-        COUNT(*) FILTER (WHERE status = 'cancelled')::int AS cancelled_invoice_count,
-        COALESCE(SUM(total_amount) FILTER (WHERE status = 'paid'), 0)::double precision AS paid_invoice_amount,
-        COALESCE(SUM(total_amount) FILTER (WHERE status = 'pending_review'), 0)::double precision AS pending_review_invoice_amount,
-        COALESCE(SUM(total_amount) FILTER (WHERE status IN ('unpaid', 'overdue')), 0)::double precision AS outstanding_invoice_amount,
-        COALESCE(SUM(total_amount) FILTER (WHERE status = 'overdue'), 0)::double precision AS overdue_invoice_amount,
+
+        COUNT(*) FILTER (WHERE resolved_status = 'paid')::int AS paid_invoice_count,
+        COUNT(*) FILTER (WHERE resolved_status = 'pending_review')::int AS pending_review_invoice_count,
+        COUNT(*) FILTER (WHERE resolved_status = 'unpaid')::int AS unpaid_invoice_count,
+        COUNT(*) FILTER (WHERE resolved_status = 'overdue')::int AS overdue_invoice_count,
+        COUNT(*) FILTER (WHERE resolved_status IN ('unpaid', 'overdue'))::int AS outstanding_invoice_count,
+        COUNT(*) FILTER (WHERE resolved_status = 'cancelled')::int AS cancelled_invoice_count,
+
+        COALESCE(SUM(total_amount) FILTER (WHERE resolved_status = 'paid'), 0)::double precision AS paid_invoice_amount,
+        COALESCE(SUM(total_amount) FILTER (WHERE resolved_status = 'pending_review'), 0)::double precision AS pending_review_invoice_amount,
+        COALESCE(SUM(total_amount) FILTER (WHERE resolved_status = 'unpaid'), 0)::double precision AS unpaid_invoice_amount,
+        COALESCE(SUM(total_amount) FILTER (WHERE resolved_status = 'overdue'), 0)::double precision AS overdue_invoice_amount,
+        COALESCE(SUM(total_amount) FILTER (WHERE resolved_status IN ('unpaid', 'overdue')), 0)::double precision AS outstanding_invoice_amount,
+
         COALESCE(SUM(base_rent_amount), 0)::double precision AS base_rent_total,
         COALESCE(SUM(water_amount), 0)::double precision AS water_total,
         COALESCE(SUM(electric_amount), 0)::double precision AS electric_total,
         COALESCE(SUM(other_amount), 0)::double precision AS other_total,
         COALESCE(SUM(discount_amount), 0)::double precision AS discount_total,
+
         COALESCE((SELECT SUM(submitted_amount) FROM payment_base WHERE status = 'approved'), 0)::double precision AS approved_payment_amount,
         COALESCE((SELECT SUM(submitted_amount) FROM payment_base WHERE status = 'submitted'), 0)::double precision AS submitted_payment_amount,
         COALESCE((SELECT SUM(submitted_amount) FROM payment_base WHERE status = 'rejected'), 0)::double precision AS rejected_payment_amount,
@@ -219,22 +243,16 @@ async function getOverview({ dormId, month }) {
       totalInvoices: toNumber(financeSummary.total_invoices),
       totalBilledAmount: toNumber(financeSummary.total_billed_amount),
       paidInvoiceCount: toNumber(financeSummary.paid_invoice_count),
-      pendingReviewInvoiceCount: toNumber(
-        financeSummary.pending_review_invoice_count
-      ),
-      outstandingInvoiceCount: toNumber(
-        financeSummary.outstanding_invoice_count
-      ),
+      pendingReviewInvoiceCount: toNumber(financeSummary.pending_review_invoice_count),
+      unpaidInvoiceCount: toNumber(financeSummary.unpaid_invoice_count),
       overdueInvoiceCount: toNumber(financeSummary.overdue_invoice_count),
+      outstandingInvoiceCount: toNumber(financeSummary.outstanding_invoice_count),
       cancelledInvoiceCount: toNumber(financeSummary.cancelled_invoice_count),
       paidInvoiceAmount: toNumber(financeSummary.paid_invoice_amount),
-      pendingReviewInvoiceAmount: toNumber(
-        financeSummary.pending_review_invoice_amount
-      ),
-      outstandingInvoiceAmount: toNumber(
-        financeSummary.outstanding_invoice_amount
-      ),
+      pendingReviewInvoiceAmount: toNumber(financeSummary.pending_review_invoice_amount),
+      unpaidInvoiceAmount: toNumber(financeSummary.unpaid_invoice_amount),
       overdueInvoiceAmount: toNumber(financeSummary.overdue_invoice_amount),
+      outstandingInvoiceAmount: toNumber(financeSummary.outstanding_invoice_amount),
       baseRentTotal: toNumber(financeSummary.base_rent_total),
       waterTotal: toNumber(financeSummary.water_total),
       electricTotal: toNumber(financeSummary.electric_total),
@@ -263,9 +281,8 @@ async function getOverview({ dormId, month }) {
       expiringIn30DaysCount: toNumber(contractSummary.expiring_in_30_days_count),
     },
     alerts: {
-      pendingReviewInvoices: toNumber(
-        financeSummary.pending_review_invoice_count
-      ),
+      pendingReviewInvoices: toNumber(financeSummary.pending_review_invoice_count),
+      unpaidInvoices: toNumber(financeSummary.unpaid_invoice_count),
       overdueInvoices: toNumber(financeSummary.overdue_invoice_count),
       submittedPayments: toNumber(financeSummary.submitted_payment_count),
       rejectedPayments: toNumber(financeSummary.rejected_payment_count),
@@ -341,21 +358,37 @@ async function getRevenueTrend({ dormId, months }) {
 
 async function getPaymentStatus({ dormId, month }) {
   const monthDate = monthToDate(month);
+  const resolvedStatusSql = getResolvedInvoiceStatusSql(
+    "i.status",
+    "i.due_date"
+  );
 
   const { rows } = await pool.query(
     `
+      WITH invoice_base AS (
+        SELECT
+          i.*,
+          ${resolvedStatusSql} AS resolved_status
+        FROM public.invoices i
+        WHERE i.dorm_id = $1
+          AND DATE_TRUNC('month', i.billing_month) = DATE_TRUNC('month', $2::date)
+      )
       SELECT
         COUNT(*)::int AS total_invoices,
         COALESCE(SUM(total_amount), 0)::double precision AS total_amount,
-        COUNT(*) FILTER (WHERE status = 'paid')::int AS paid_count,
-        COUNT(*) FILTER (WHERE status = 'pending_review')::int AS pending_count,
-        COUNT(*) FILTER (WHERE status IN ('unpaid', 'overdue'))::int AS outstanding_count,
-        COALESCE(SUM(total_amount) FILTER (WHERE status = 'paid'), 0)::double precision AS paid_amount,
-        COALESCE(SUM(total_amount) FILTER (WHERE status = 'pending_review'), 0)::double precision AS pending_amount,
-        COALESCE(SUM(total_amount) FILTER (WHERE status IN ('unpaid', 'overdue')), 0)::double precision AS outstanding_amount
-      FROM public.invoices
-      WHERE dorm_id = $1
-        AND DATE_TRUNC('month', billing_month) = DATE_TRUNC('month', $2::date)
+
+        COUNT(*) FILTER (WHERE resolved_status = 'paid')::int AS paid_count,
+        COUNT(*) FILTER (WHERE resolved_status = 'pending_review')::int AS pending_count,
+        COUNT(*) FILTER (WHERE resolved_status = 'unpaid')::int AS unpaid_count,
+        COUNT(*) FILTER (WHERE resolved_status = 'overdue')::int AS overdue_count,
+        COUNT(*) FILTER (WHERE resolved_status IN ('unpaid', 'overdue'))::int AS outstanding_count,
+
+        COALESCE(SUM(total_amount) FILTER (WHERE resolved_status = 'paid'), 0)::double precision AS paid_amount,
+        COALESCE(SUM(total_amount) FILTER (WHERE resolved_status = 'pending_review'), 0)::double precision AS pending_amount,
+        COALESCE(SUM(total_amount) FILTER (WHERE resolved_status = 'unpaid'), 0)::double precision AS unpaid_amount,
+        COALESCE(SUM(total_amount) FILTER (WHERE resolved_status = 'overdue'), 0)::double precision AS overdue_amount,
+        COALESCE(SUM(total_amount) FILTER (WHERE resolved_status IN ('unpaid', 'overdue')), 0)::double precision AS outstanding_amount
+      FROM invoice_base
     `,
     [dormId, monthDate]
   );
@@ -377,10 +410,16 @@ async function getPaymentStatus({ dormId, month }) {
       amount: toNumber(summary.pending_amount),
     },
     {
-      key: "outstanding",
-      label: "ค้างชำระ",
-      count: toNumber(summary.outstanding_count),
-      amount: toNumber(summary.outstanding_amount),
+      key: "unpaid",
+      label: "ยังไม่ชำระ",
+      count: toNumber(summary.unpaid_count),
+      amount: toNumber(summary.unpaid_amount),
+    },
+    {
+      key: "overdue",
+      label: "เกินกำหนดชำระ",
+      count: toNumber(summary.overdue_count),
+      amount: toNumber(summary.overdue_amount),
     },
   ].map((item) => ({
     ...item,
@@ -392,6 +431,19 @@ async function getPaymentStatus({ dormId, month }) {
     month,
     totalInvoices: toNumber(summary.total_invoices),
     totalAmount,
+
+    paidCount: toNumber(summary.paid_count),
+    pendingCount: toNumber(summary.pending_count),
+    unpaidCount: toNumber(summary.unpaid_count),
+    overdueCount: toNumber(summary.overdue_count),
+    outstandingCount: toNumber(summary.outstanding_count),
+
+    paidAmount: toNumber(summary.paid_amount),
+    pendingAmount: toNumber(summary.pending_amount),
+    unpaidAmount: toNumber(summary.unpaid_amount),
+    overdueAmount: toNumber(summary.overdue_amount),
+    outstandingAmount: toNumber(summary.outstanding_amount),
+
     items,
   };
 }
@@ -819,10 +871,13 @@ async function getMonthlyRevenueSummaryReport({ dormId, months }) {
           COALESCE(SUM(total_amount), 0)::double precision AS total_billed_amount,
           COALESCE(SUM(total_amount) FILTER (WHERE status = 'paid'), 0)::double precision AS paid_invoice_amount,
           COALESCE(SUM(total_amount) FILTER (WHERE status = 'pending_review'), 0)::double precision AS pending_review_amount,
-          COALESCE(SUM(total_amount) FILTER (WHERE status IN ('unpaid', 'overdue')), 0)::double precision AS outstanding_amount,
+          COALESCE(SUM(total_amount) FILTER (WHERE status = 'unpaid'), 0)::double precision AS unpaid_amount,
           COALESCE(SUM(total_amount) FILTER (WHERE status = 'overdue'), 0)::double precision AS overdue_amount,
+          COALESCE(SUM(total_amount) FILTER (WHERE status IN ('unpaid', 'overdue')), 0)::double precision AS outstanding_amount,
           COUNT(*) FILTER (WHERE status = 'paid')::int AS paid_invoice_count,
           COUNT(*) FILTER (WHERE status = 'pending_review')::int AS pending_review_count,
+          COUNT(*) FILTER (WHERE status = 'unpaid')::int AS unpaid_count,
+          COUNT(*) FILTER (WHERE status = 'overdue')::int AS overdue_count,
           COUNT(*) FILTER (WHERE status IN ('unpaid', 'overdue'))::int AS outstanding_count
         FROM public.invoices
         WHERE dorm_id = $1
@@ -860,10 +915,13 @@ async function getMonthlyRevenueSummaryReport({ dormId, months }) {
         COALESCE(ia.total_billed_amount, 0)::double precision AS total_billed_amount,
         COALESCE(ia.paid_invoice_amount, 0)::double precision AS paid_invoice_amount,
         COALESCE(ia.pending_review_amount, 0)::double precision AS pending_review_amount,
-        COALESCE(ia.outstanding_amount, 0)::double precision AS outstanding_amount,
+        COALESCE(ia.unpaid_amount, 0)::double precision AS unpaid_amount,
         COALESCE(ia.overdue_amount, 0)::double precision AS overdue_amount,
+        COALESCE(ia.outstanding_amount, 0)::double precision AS outstanding_amount,
         COALESCE(ia.paid_invoice_count, 0)::int AS paid_invoice_count,
         COALESCE(ia.pending_review_count, 0)::int AS pending_review_count,
+        COALESCE(ia.unpaid_count, 0)::int AS unpaid_count,
+        COALESCE(ia.overdue_count, 0)::int AS overdue_count,
         COALESCE(ia.outstanding_count, 0)::int AS outstanding_count,
         COALESCE(pa.approved_payment_amount, 0)::double precision AS approved_payment_amount,
         COALESCE(pa.submitted_payment_amount, 0)::double precision AS submitted_payment_amount,
@@ -893,10 +951,13 @@ async function getMonthlyRevenueSummaryReport({ dormId, months }) {
     totalBilledAmount: toNumber(row.total_billed_amount),
     paidInvoiceAmount: toNumber(row.paid_invoice_amount),
     pendingReviewAmount: toNumber(row.pending_review_amount),
-    outstandingAmount: toNumber(row.outstanding_amount),
+    unpaidAmount: toNumber(row.unpaid_amount),
     overdueAmount: toNumber(row.overdue_amount),
+    outstandingAmount: toNumber(row.outstanding_amount),
     paidInvoiceCount: toNumber(row.paid_invoice_count),
     pendingReviewCount: toNumber(row.pending_review_count),
+    unpaidCount: toNumber(row.unpaid_count),
+    overdueCount: toNumber(row.overdue_count),
     outstandingCount: toNumber(row.outstanding_count),
     approvedPaymentAmount: toNumber(row.approved_payment_amount),
     submittedPaymentAmount: toNumber(row.submitted_payment_amount),
