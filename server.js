@@ -20,6 +20,7 @@ const repairRoutes = require("./routes/repair.routes");
 const publicRoutes = require("./routes/public.routes");
 const reviewRoutes = require("./routes/review.routes");
 const dashboardRoutes = require("./routes/dashboard.routes");
+const notificationRoutes = require("./routes/notifications.routes");
 
 dotenv.config();
 
@@ -56,6 +57,7 @@ app.use("/api/payments", paymentRoutes);
 app.use("/api/repair-requests", repairRoutes);
 app.use("/api/reviews", reviewRoutes);
 app.use("/api/dashboard", dashboardRoutes);
+app.use("/api/notifications", notificationRoutes);
 
 app.listen(PORT, async () => {
   try {
