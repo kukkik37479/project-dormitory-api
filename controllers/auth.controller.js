@@ -193,102 +193,108 @@ async function register(req, res) {
   }
 }
 
+async function findUserByIdentifier(identifier) {
+  const normalizedIdentifier = String(identifier || "").trim().toLowerCase();
+
+  if (!normalizedIdentifier) {
+    return null;
+  }
+
+  if (normalizedIdentifier.includes("@")) {
+    const [rawUsername, rawDormSlug] = normalizedIdentifier.split("@");
+
+    const parsedUsername = String(rawUsername || "").trim().toLowerCase();
+    const parsedDormSlug = String(rawDormSlug || "").trim().toLowerCase();
+
+    if (!parsedUsername || !parsedDormSlug) {
+      return null;
+    }
+
+    const result = await pool.query(
+      `
+      SELECT
+        u.id,
+        u.role,
+        u.email,
+        u.username,
+        u.password_hash,
+        u.full_name,
+        u.phone,
+        u.avatar_url,
+        u.must_change_password,
+        u.is_active,
+        u.created_at,
+        u.updated_at,
+        d.id AS dorm_id,
+        d.dorm_slug,
+        d.name AS dorm_name,
+        d.name_en AS dorm_name_en,
+        up.prefix,
+        up.gender,
+        up.birth_date
+      FROM public.users u
+      JOIN public.dorms d
+        ON d.id = u.login_dorm_id
+      LEFT JOIN public.user_profiles up
+        ON up.user_id = u.id
+      WHERE lower(u.username) = lower($1)
+        AND lower(d.dorm_slug) = lower($2)
+      LIMIT 1
+      `,
+      [parsedUsername, parsedDormSlug]
+    );
+
+    return result.rows[0] || null;
+  }
+
+  const result = await pool.query(
+    `
+    SELECT
+      u.id,
+      u.role,
+      u.email,
+      u.username,
+      u.password_hash,
+      u.full_name,
+      u.phone,
+      u.avatar_url,
+      u.must_change_password,
+      u.is_active,
+      u.created_at,
+      u.updated_at,
+      NULL::uuid AS dorm_id,
+      NULL::varchar AS dorm_slug,
+      NULL::varchar AS dorm_name,
+      NULL::varchar AS dorm_name_en,
+      up.prefix,
+      up.gender,
+      up.birth_date
+    FROM public.users u
+    LEFT JOIN public.user_profiles up
+      ON up.user_id = u.id
+    WHERE lower(u.username) = lower($1)
+      AND u.role = 'admin'
+    LIMIT 1
+    `,
+    [normalizedIdentifier]
+  );
+
+  return result.rows[0] || null;
+}
+
 // LOGIN: owner / tenant => username@dorm_slug
 // admin => username (plain)
 async function login(req, res) {
   try {
     const { identifier, password } = req.body;
 
-    const normalizedIdentifier = String(identifier).trim().toLowerCase();
+    const user = await findUserByIdentifier(identifier);
 
-    let result;
-
-    if (normalizedIdentifier.includes("@")) {
-      const [rawUsername, rawDormSlug] = normalizedIdentifier.split("@");
-
-      const parsedUsername = String(rawUsername || "").trim().toLowerCase();
-      const parsedDormSlug = String(rawDormSlug || "").trim().toLowerCase();
-
-      if (!parsedUsername || !parsedDormSlug) {
-        return res.status(400).json({
-          message: "Invalid login format",
-        });
-      }
-
-      result = await pool.query(
-        `
-        SELECT
-          u.id,
-          u.role,
-          u.email,
-          u.username,
-          u.password_hash,
-          u.full_name,
-          u.phone,
-          u.avatar_url,
-          u.must_change_password,
-          u.is_active,
-          u.created_at,
-          u.updated_at,
-          d.id AS dorm_id,
-          d.dorm_slug,
-          d.name AS dorm_name,
-          d.name_en AS dorm_name_en,
-          up.prefix,
-          up.gender,
-          up.birth_date
-        FROM public.users u
-        JOIN public.dorms d
-          ON d.id = u.login_dorm_id
-        LEFT JOIN public.user_profiles up
-          ON up.user_id = u.id
-        WHERE lower(u.username) = lower($1)
-          AND lower(d.dorm_slug) = lower($2)
-        LIMIT 1
-        `,
-        [parsedUsername, parsedDormSlug]
-      );
-    } else {
-      result = await pool.query(
-        `
-        SELECT
-          u.id,
-          u.role,
-          u.email,
-          u.username,
-          u.password_hash,
-          u.full_name,
-          u.phone,
-          u.avatar_url,
-          u.must_change_password,
-          u.is_active,
-          u.created_at,
-          u.updated_at,
-          NULL::uuid AS dorm_id,
-          NULL::varchar AS dorm_slug,
-          NULL::varchar AS dorm_name,
-          NULL::varchar AS dorm_name_en,
-          up.prefix,
-          up.gender,
-          up.birth_date
-        FROM public.users u
-        LEFT JOIN public.user_profiles up
-          ON up.user_id = u.id
-        WHERE lower(u.username) = lower($1)
-          AND u.role = 'admin'
-        LIMIT 1
-        `,
-        [normalizedIdentifier]
-      );
-    }
-
-    if (result.rows.length === 0) {
+    if (!user) {
       return res.status(401).json({
         message: "Invalid identifier or password",
       });
     }
-
-    const user = result.rows[0];
 
     if (!user.is_active) {
       return res.status(403).json({
@@ -345,6 +351,59 @@ async function login(req, res) {
     });
   } catch (error) {
     console.error("LOGIN ERROR:", error);
+    return res.status(500).json({
+      message: "Internal server error",
+    });
+  }
+}
+
+// QUICK DEMO: forgot password without old password
+async function forgotPasswordDemo(req, res) {
+  try {
+    const { identifier, new_password } = req.body;
+
+    const normalizedIdentifier = String(identifier || "").trim().toLowerCase();
+    const nextPassword = String(new_password || "");
+
+    if (!normalizedIdentifier || !nextPassword) {
+      return res.status(400).json({
+        message: "identifier and new_password are required",
+      });
+    }
+
+    if (nextPassword.length < 6) {
+      return res.status(400).json({
+        message: "New password must be at least 6 characters",
+      });
+    }
+
+    const user = await findUserByIdentifier(normalizedIdentifier);
+
+    if (!user) {
+      return res.status(404).json({
+        message: "User not found",
+      });
+    }
+
+    const passwordHash = await bcrypt.hash(nextPassword, 10);
+
+    await pool.query(
+      `
+      UPDATE public.users
+      SET
+        password_hash = $1,
+        must_change_password = false,
+        updated_at = now()
+      WHERE id = $2
+      `,
+      [passwordHash, user.id]
+    );
+
+    return res.status(200).json({
+      message: "Password reset successful",
+    });
+  } catch (error) {
+    console.error("FORGOT PASSWORD DEMO ERROR:", error);
     return res.status(500).json({
       message: "Internal server error",
     });
@@ -416,5 +475,6 @@ async function me(req, res) {
 module.exports = {
   register,
   login,
+  forgotPasswordDemo,
   me,
 };
