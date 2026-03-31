@@ -98,45 +98,53 @@ async function getImagesByDormId(client, dormId) {
   return result.rows;
 }
 
+async function getCurrentOwnerDorm(client, ownerUserId) {
+  const result = await client.query(
+    `
+    SELECT
+      d.id,
+      d.owner_user_id,
+      d.name,
+      d.name_en,
+      d.phone,
+      d.full_address,
+      d.road,
+      d.alley,
+      d.subdistrict,
+      d.district,
+      d.province,
+      d.postal_code,
+      d.description,
+      d.status,
+      d.dorm_slug,
+      d.latitude,
+      d.longitude,
+      d.water_rate,
+      d.electric_rate,
+      d.contact_name,
+      d.contact_email,
+      d.line_id,
+      d.created_at,
+      d.updated_at
+    FROM public.users u
+    JOIN public.dorms d
+      ON d.id = u.login_dorm_id
+    WHERE u.id = $1
+      AND u.role = 'owner'
+      AND d.owner_user_id = $1
+    LIMIT 1
+    `,
+    [ownerUserId]
+  );
+
+  return result.rows[0] || null;
+}
+
 async function getMyDormProfileByOwnerId(ownerUserId) {
   const client = await pool.connect();
 
   try {
-    const dormResult = await client.query(
-      `
-      SELECT
-        id,
-        owner_user_id,
-        name,
-        name_en,
-        phone,
-        full_address,
-        road,
-        alley,
-        subdistrict,
-        district,
-        province,
-        postal_code,
-        description,
-        status,
-        dorm_slug,
-        latitude,
-        longitude,
-        water_rate,
-        electric_rate,
-        contact_name,
-        contact_email,
-        line_id,
-        created_at,
-        updated_at
-      FROM public.dorms
-      WHERE owner_user_id = $1
-      LIMIT 1
-      `,
-      [ownerUserId]
-    );
-
-    const dorm = dormResult.rows[0] || null;
+    const dorm = await getCurrentOwnerDorm(client, ownerUserId);
 
     if (!dorm) {
       return null;
@@ -192,6 +200,13 @@ async function updateMyDormProfileByOwnerId(ownerUserId, payload) {
   try {
     await client.query("BEGIN");
 
+    const currentDorm = await getCurrentOwnerDorm(client, ownerUserId);
+
+    if (!currentDorm) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+
     const dormResult = await client.query(
       `
       UPDATE public.dorms
@@ -215,7 +230,8 @@ async function updateMyDormProfileByOwnerId(ownerUserId, payload) {
         contact_email = $17,
         line_id = $18,
         updated_at = now()
-      WHERE owner_user_id = $19
+      WHERE id = $19
+        AND owner_user_id = $20
       RETURNING
         id,
         owner_user_id,
@@ -265,6 +281,7 @@ async function updateMyDormProfileByOwnerId(ownerUserId, payload) {
         contact_name ? String(contact_name).trim() : null,
         contact_email ? String(contact_email).trim().toLowerCase() : null,
         line_id ? String(line_id).trim() : null,
+        currentDorm.id,
         ownerUserId,
       ]
     );
@@ -427,6 +444,7 @@ async function updateMyDormProfileByOwnerId(ownerUserId, payload) {
 
     const savedRoomTypes = await getRoomTypesByDormId(client, dorm.id);
     const savedAmenities = await getAmenitiesByDormId(client, dorm.id);
+    const amenityOptions = await getAmenityOptions(client);
     const savedContactPhones = await getContactPhonesByDormId(client, dorm.id);
     const savedImages = await getImagesByDormId(client, dorm.id);
 
@@ -436,6 +454,7 @@ async function updateMyDormProfileByOwnerId(ownerUserId, payload) {
       ...dorm,
       room_types: savedRoomTypes,
       amenities: savedAmenities,
+      amenity_options: amenityOptions,
       contact_phones: savedContactPhones,
       images: savedImages,
     };
