@@ -3,6 +3,7 @@ const router = express.Router();
 
 const {
   getAnnouncements,
+  postMarkAnnouncementsSeen,
   postAnnouncement,
   patchAnnouncement,
   removeAnnouncement,
@@ -14,6 +15,7 @@ const {
 const { verifyToken } = require("../middleware/auth.middleware");
 
 router.get("/", verifyToken, getAnnouncements);
+router.post("/mark-seen", verifyToken, postMarkAnnouncementsSeen);
 router.post("/", verifyToken, postAnnouncement);
 router.patch("/:announcementId", verifyToken, patchAnnouncement);
 router.delete("/:announcementId", verifyToken, removeAnnouncement);

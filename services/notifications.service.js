@@ -1,4 +1,7 @@
 const { pool } = require("../config/db");
+const {
+  getUnreadAnnouncementCountByUser,
+} = require("./announcement.service");
 
 function createError(status, message) {
   const error = new Error(message);
@@ -14,7 +17,7 @@ function toInt(value) {
 function getUserContext(user = {}) {
   return {
     userId: user.userId || user.id || user.user_id || user.sub || null,
-    dormId: user.dormId || user.loginDormId || user.login_dorm_id || null,
+    dormId: user.dormId || user.dorm_id || user.loginDormId || user.login_dorm_id || null,
     role: user.role || null,
   };
 }
@@ -110,79 +113,89 @@ async function getOwnerSummary({ userId, dormId }) {
       ),
     ]);
 
-  const summary = {
-    chat: toInt(chatResult.rows[0]?.count),
-    payments: toInt(paymentResult.rows[0]?.count),
-    repairs: toInt(repairResult.rows[0]?.count),
-    reviews: toInt(reviewResult.rows[0]?.count),
-  };
+  const chatMessages = toInt(chatResult.rows[0]?.count);
+  const payments = toInt(paymentResult.rows[0]?.count);
+  const repairs = toInt(repairResult.rows[0]?.count);
+  const reviews = toInt(reviewResult.rows[0]?.count);
 
   return {
-    ...summary,
-    total: summary.chat + summary.payments + summary.repairs + summary.reviews,
+    chat: chatMessages,
+    chat_messages: chatMessages,
+    announcements: 0,
+    payments,
+    repairs,
+    reviews,
+    total: chatMessages + payments + repairs + reviews,
   };
 }
 
-async function getTenantSummary({ userId }) {
-  const [chatResult, paymentResult, repairResult] = await Promise.all([
-    pool.query(
-      `
-      SELECT COUNT(*)::int AS count
-      FROM public.chat_messages cm
-      JOIN public.chat_conversations cc
-        ON cc.id = cm.conversation_id
-      JOIN public.rental_contracts rc
-        ON rc.id = cc.rental_contract_id
-      WHERE cc.tenant_user_id = $1
-        AND cm.sender_user_id <> $1
-        AND cm.read_at IS NULL
-        AND rc.status = 'active'
-      `,
-      [userId]
-    ),
+async function getTenantSummary({ userId, dormId }) {
+  const [chatResult, announcementCount, paymentResult, repairResult] =
+    await Promise.all([
+      pool.query(
+        `
+        SELECT COUNT(*)::int AS count
+        FROM public.chat_messages cm
+        JOIN public.chat_conversations cc
+          ON cc.id = cm.conversation_id
+        JOIN public.rental_contracts rc
+          ON rc.id = cc.rental_contract_id
+        WHERE cc.tenant_user_id = $1
+          AND cm.sender_user_id <> $1
+          AND cm.read_at IS NULL
+          AND rc.status = 'active'
+        `,
+        [userId]
+      ),
 
-    pool.query(
-      `
-      SELECT COUNT(*)::int AS count
-      FROM public.invoices i
-      LEFT JOIN LATERAL (
-        SELECT
-          p.status
-        FROM public.payments p
-        WHERE p.invoice_id = i.id
-        ORDER BY p.created_at DESC
-        LIMIT 1
-      ) lp ON true
-      WHERE i.tenant_user_id = $1
-        AND (
-          i.status IN ('draft', 'unpaid', 'overdue', 'pending_review')
-          OR lp.status = 'rejected'
-        )
-      `,
-      [userId]
-    ),
+      getUnreadAnnouncementCountByUser(userId, "tenant", dormId),
 
-    pool.query(
-      `
-      SELECT COUNT(*)::int AS count
-      FROM public.repair_requests
-      WHERE tenant_user_id = $1
-        AND status IN ('pending', 'in_progress', 'waiting_parts')
-      `,
-      [userId]
-    ),
-  ]);
+      pool.query(
+        `
+        SELECT COUNT(*)::int AS count
+        FROM public.invoices i
+        LEFT JOIN LATERAL (
+          SELECT
+            p.status
+          FROM public.payments p
+          WHERE p.invoice_id = i.id
+          ORDER BY p.created_at DESC
+          LIMIT 1
+        ) lp ON true
+        WHERE i.tenant_user_id = $1
+          AND (
+            i.status IN ('draft', 'unpaid', 'overdue', 'pending_review')
+            OR lp.status = 'rejected'
+          )
+        `,
+        [userId]
+      ),
 
-  const summary = {
-    chat: toInt(chatResult.rows[0]?.count),
-    payments: toInt(paymentResult.rows[0]?.count),
-    repairs: toInt(repairResult.rows[0]?.count),
-    reviews: 0,
-  };
+      pool.query(
+        `
+        SELECT COUNT(*)::int AS count
+        FROM public.repair_requests
+        WHERE tenant_user_id = $1
+          AND status IN ('pending', 'in_progress', 'waiting_parts')
+        `,
+        [userId]
+      ),
+    ]);
+
+  const chatMessages = toInt(chatResult.rows[0]?.count);
+  const announcements = toInt(announcementCount);
+  const chat = chatMessages + announcements;
+  const payments = toInt(paymentResult.rows[0]?.count);
+  const repairs = toInt(repairResult.rows[0]?.count);
 
   return {
-    ...summary,
-    total: summary.chat + summary.payments + summary.repairs + summary.reviews,
+    chat,
+    chat_messages: chatMessages,
+    announcements,
+    payments,
+    repairs,
+    reviews: 0,
+    total: chat + payments + repairs,
   };
 }
 
@@ -202,11 +215,13 @@ async function buildNotificationSummary(user = {}) {
   }
 
   if (role === "tenant") {
-    return getTenantSummary({ userId });
+    return getTenantSummary({ userId, dormId });
   }
 
   return {
     chat: 0,
+    chat_messages: 0,
+    announcements: 0,
     payments: 0,
     repairs: 0,
     reviews: 0,

@@ -30,17 +30,46 @@ async function getOwnerDormId(client, ownerUserId) {
   return dorm.id;
 }
 
+async function getTenantDormId(client, tenantUserId, dormIdFromToken = null) {
+  if (dormIdFromToken) {
+    return dormIdFromToken;
+  }
+
+  const result = await client.query(
+    `
+    SELECT rc.dorm_id
+    FROM public.rental_contracts rc
+    INNER JOIN public.users u
+      ON u.id = rc.tenant_user_id
+    WHERE rc.tenant_user_id = $1
+      AND rc.status = 'active'
+      AND COALESCE(u.is_active, true) = true
+    ORDER BY rc.created_at DESC
+    LIMIT 1
+    `,
+    [tenantUserId]
+  );
+
+  const row = result.rows[0];
+
+  if (!row?.dorm_id) {
+    throw createError(404, "Dorm not found");
+  }
+
+  return row.dorm_id;
+}
+
 async function resolveDormIdForRequest(client, userId, role, dormId) {
   if (role === "owner") {
     if (dormId) return dormId;
     return getOwnerDormId(client, userId);
   }
 
-  if (!dormId) {
-    throw createError(400, "dormId is required");
+  if (role === "tenant") {
+    return getTenantDormId(client, userId, dormId);
   }
 
-  return dormId;
+  throw createError(403, "Unsupported role");
 }
 
 async function ensureOwnerCanManageDorm(client, ownerUserId, dormId) {
@@ -136,6 +165,112 @@ async function getAnnouncementsByUser(userId, role, dormId) {
     }
 
     throw createError(403, "Unsupported role");
+  } finally {
+    client.release();
+  }
+}
+
+async function getUnreadAnnouncementCountByUser(userId, role, dormId) {
+  const client = await pool.connect();
+
+  try {
+    if (!userId) {
+      throw createError(401, "Unauthorized");
+    }
+
+    if (role === "owner") {
+      return 0;
+    }
+
+    if (role !== "tenant") {
+      return 0;
+    }
+
+    const resolvedDormId = await resolveDormIdForRequest(
+      client,
+      userId,
+      role,
+      dormId
+    );
+
+    const result = await client.query(
+      `
+      SELECT COUNT(*)::int AS unread_count
+      FROM public.announcements a
+      WHERE a.dorm_id = $2
+        AND a.status = 'published'
+        AND a.created_at > COALESCE(
+          (
+            SELECT u.announcement_last_seen_at
+            FROM public.users u
+            WHERE u.id = $1
+            LIMIT 1
+          ),
+          to_timestamp(0)
+        )
+      `,
+      [userId, resolvedDormId]
+    );
+
+    return Number(result.rows[0]?.unread_count || 0);
+  } finally {
+    client.release();
+  }
+}
+
+async function markAnnouncementsSeenByUser(userId, role, dormId) {
+  const client = await pool.connect();
+
+  try {
+    if (!userId) {
+      throw createError(401, "Unauthorized");
+    }
+
+    if (!["owner", "tenant"].includes(role)) {
+      throw createError(403, "Unsupported role");
+    }
+
+    if (role === "owner") {
+      const resolvedDormId = await resolveDormIdForRequest(
+        client,
+        userId,
+        role,
+        dormId
+      );
+
+      const canManage = await ensureOwnerCanManageDorm(
+        client,
+        userId,
+        resolvedDormId
+      );
+
+      if (!canManage) {
+        throw createError(403, "Access denied");
+      }
+    }
+
+    if (role === "tenant") {
+      await resolveDormIdForRequest(client, userId, role, dormId);
+    }
+
+    const result = await client.query(
+      `
+      UPDATE public.users
+      SET
+        announcement_last_seen_at = now()
+      WHERE id = $1
+      RETURNING
+        id,
+        announcement_last_seen_at
+      `,
+      [userId]
+    );
+
+    if (!result.rows[0]) {
+      throw createError(404, "User not found");
+    }
+
+    return result.rows[0];
   } finally {
     client.release();
   }
@@ -678,6 +813,8 @@ async function archiveVacancyAnnouncement({
 
 module.exports = {
   getAnnouncementsByUser,
+  getUnreadAnnouncementCountByUser,
+  markAnnouncementsSeenByUser,
   createAnnouncement,
   updateAnnouncement,
   deleteAnnouncement,

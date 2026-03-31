@@ -6,6 +6,7 @@ const {
   getVacancyAnnouncementsByOwner,
   createVacancyAnnouncement,
   archiveVacancyAnnouncement,
+  markAnnouncementsSeenByUser,
 } = require("../services/announcement.service");
 
 function getUserFromRequest(req) {
@@ -39,6 +40,31 @@ async function getAnnouncements(req, res) {
     console.error("getAnnouncements error:", error);
     return res.status(error.statusCode || 500).json({
       message: error.message || "Failed to fetch announcements",
+    });
+  }
+}
+
+async function postMarkAnnouncementsSeen(req, res) {
+  try {
+    const { id, role, dormId: dormIdFromToken } = getUserFromRequest(req);
+    const dormId = req.body?.dorm_id || req.query?.dormId || dormIdFromToken;
+
+    if (!id || !role) {
+      return res.status(401).json({
+        message: "Unauthorized",
+      });
+    }
+
+    const result = await markAnnouncementsSeenByUser(id, role, dormId);
+
+    return res.status(200).json({
+      message: "Announcements marked as seen successfully",
+      data: result,
+    });
+  } catch (error) {
+    console.error("postMarkAnnouncementsSeen error:", error);
+    return res.status(error.statusCode || 500).json({
+      message: error.message || "Failed to mark announcements as seen",
     });
   }
 }
@@ -270,6 +296,7 @@ async function removeVacancyAnnouncement(req, res) {
 
 module.exports = {
   getAnnouncements,
+  postMarkAnnouncementsSeen,
   postAnnouncement,
   patchAnnouncement,
   removeAnnouncement,
