@@ -1,9 +1,5 @@
-const fs = require("fs");
-const path = require("path");
 const multer = require("multer");
-
-const uploadDir = path.join(__dirname, "../../uploads/contracts");
-fs.mkdirSync(uploadDir, { recursive: true });
+const path = require("path");
 
 function decodeThaiFileName(name = "") {
   try {
@@ -12,27 +8,6 @@ function decodeThaiFileName(name = "") {
     return name;
   }
 }
-
-function sanitizeFileName(name) {
-  return String(name || "")
-    .trim()
-    .replace(/\s+/g, "-")
-    .replace(/[^a-zA-Z0-9ก-๙._-]/g, "");
-}
-
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => {
-    cb(null, uploadDir);
-  },
-  filename: (_req, file, cb) => {
-    const decodedOriginalName = decodeThaiFileName(file.originalname || "contract");
-    const ext = path.extname(decodedOriginalName).toLowerCase();
-    const baseName = path.basename(decodedOriginalName, ext);
-    const safeBaseName = sanitizeFileName(baseName) || "contract";
-
-    cb(null, `${Date.now()}-${safeBaseName}${ext}`);
-  },
-});
 
 function fileFilter(_req, file, cb) {
   const allowedMimeTypes = ["application/pdf"];
@@ -47,7 +22,7 @@ function fileFilter(_req, file, cb) {
 }
 
 const contractUpload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   fileFilter,
   limits: {
     fileSize: 10 * 1024 * 1024,

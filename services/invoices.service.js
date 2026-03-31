@@ -71,6 +71,44 @@ function computeDueDate(billingMonth, billingDueDay = 1) {
   return `${year}-${month}-${day}`;
 }
 
+function resolveInvoiceStatus(status, dueDate) {
+  if (status !== "unpaid") return status;
+  if (!dueDate) return status;
+
+  const parsedDueDate = new Date(dueDate);
+  if (Number.isNaN(parsedDueDate.getTime())) return status;
+
+  const dueDateEnd = new Date(parsedDueDate);
+  dueDateEnd.setHours(23, 59, 59, 999);
+
+  return Date.now() > dueDateEnd.getTime() ? "overdue" : status;
+}
+
+function getResolvedInvoiceStatusSql(
+  statusColumn = "i.status",
+  dueDateColumn = "i.due_date"
+) {
+  return `
+    CASE
+      WHEN ${statusColumn} = 'unpaid'
+       AND ${dueDateColumn} IS NOT NULL
+       AND ${dueDateColumn} < CURRENT_DATE
+      THEN 'overdue'
+      ELSE ${statusColumn}
+    END
+  `;
+}
+
+function mapInvoiceStatus(invoice) {
+  if (!invoice) return invoice;
+
+  return {
+    ...invoice,
+    raw_status: invoice.status,
+    status: resolveInvoiceStatus(invoice.status, invoice.due_date),
+  };
+}
+
 async function ensureOwnerDorm(ownerUserId, dormId, client = pool) {
   const result = await client.query(
     `
@@ -462,6 +500,7 @@ async function listInvoicesByOwnerId(ownerUserId, dormId, query = {}) {
 
   const params = [dormId];
   const conditions = [`i.dorm_id = $1`];
+  const resolvedStatusSql = getResolvedInvoiceStatusSql("i.status", "i.due_date");
 
   if (hasValue(query.building_id)) {
     params.push(query.building_id);
@@ -479,8 +518,8 @@ async function listInvoicesByOwnerId(ownerUserId, dormId, query = {}) {
   }
 
   if (hasValue(query.status)) {
-    params.push(query.status);
-    conditions.push(`i.status = $${params.length}`);
+    params.push(String(query.status).trim());
+    conditions.push(`${resolvedStatusSql} = $${params.length}`);
   }
 
   if (hasValue(query.billing_month)) {
@@ -524,7 +563,7 @@ async function listInvoicesByOwnerId(ownerUserId, dormId, query = {}) {
     params
   );
 
-  return result.rows;
+  return result.rows.map(mapInvoiceStatus);
 }
 
 async function getInvoiceDetailByOwnerId(ownerUserId, dormId, invoiceId) {
@@ -586,7 +625,7 @@ async function getInvoiceDetailByOwnerId(ownerUserId, dormId, invoiceId) {
   );
 
   return {
-    invoice,
+    invoice: mapInvoiceStatus(invoice),
     payments: paymentsResult.rows,
   };
 }

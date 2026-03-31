@@ -47,6 +47,21 @@ function normalizePaidAt(input) {
   return date.toISOString();
 }
 
+function getResolvedInvoiceStatusSql(
+  statusColumn = "i.status",
+  dueDateColumn = "i.due_date"
+) {
+  return `
+    CASE
+      WHEN ${statusColumn} = 'unpaid'
+       AND ${dueDateColumn} IS NOT NULL
+       AND ${dueDateColumn} < CURRENT_DATE
+      THEN 'overdue'
+      ELSE ${statusColumn}
+    END
+  `;
+}
+
 function mapLatestPayment(row) {
   if (!row.payment_id) return null;
 
@@ -98,6 +113,11 @@ async function getDefaultBankAccountByDormId(dormId, client = pool) {
    ========================= */
 
 async function getTenantBillingOverviewByUserId({ userId }) {
+  const resolvedCurrentStatusSql = getResolvedInvoiceStatusSql(
+    "i.status",
+    "i.due_date"
+  );
+
   const currentInvoiceResult = await pool.query(
     `
       SELECT
@@ -112,7 +132,8 @@ async function getTenantBillingOverviewByUserId({ userId }) {
         i.other_amount,
         i.discount_amount,
         i.total_amount,
-        i.status AS invoice_status,
+        ${resolvedCurrentStatusSql} AS invoice_status,
+        i.status AS raw_invoice_status,
 
         COALESCE(i.bank_account_id, dba.id) AS resolved_bank_account_id,
         COALESCE(i.payment_bank_name, dba.bank_name) AS payment_bank_name,
@@ -185,7 +206,7 @@ async function getTenantBillingOverviewByUserId({ userId }) {
       WHERE i.tenant_user_id = $1
         AND i.status IN ('draft', 'unpaid', 'pending_review', 'overdue')
       ORDER BY
-        CASE i.status
+        CASE ${resolvedCurrentStatusSql}
           WHEN 'overdue' THEN 1
           WHEN 'pending_review' THEN 2
           WHEN 'unpaid' THEN 3
@@ -210,6 +231,11 @@ async function getTenantBillingOverviewByUserId({ userId }) {
     historyExcludeSql = `AND i.id <> $2`;
   }
 
+  const resolvedHistoryStatusSql = getResolvedInvoiceStatusSql(
+    "i.status",
+    "i.due_date"
+  );
+
   const historyResult = await pool.query(
     `
       SELECT
@@ -222,7 +248,8 @@ async function getTenantBillingOverviewByUserId({ userId }) {
         i.other_amount,
         i.discount_amount,
         i.total_amount,
-        i.status AS invoice_status,
+        ${resolvedHistoryStatusSql} AS invoice_status,
+        i.status AS raw_invoice_status,
 
         r.floor_no,
         r.room_number,
@@ -295,6 +322,7 @@ async function getTenantBillingOverviewByUserId({ userId }) {
           discount_amount: currentRow.discount_amount,
           total_amount: currentRow.total_amount,
           invoice_status: currentRow.invoice_status,
+          raw_invoice_status: currentRow.raw_invoice_status,
           payment_bank_name: currentRow.payment_bank_name,
           payment_account_name: currentRow.payment_account_name,
           payment_account_number: currentRow.payment_account_number,
@@ -320,6 +348,7 @@ async function getTenantBillingOverviewByUserId({ userId }) {
       discount_amount: row.discount_amount,
       total_amount: row.total_amount,
       invoice_status: row.invoice_status,
+      raw_invoice_status: row.raw_invoice_status,
       latest_payment: mapLatestPayment(row),
     })),
   };
@@ -480,6 +509,7 @@ async function listOwnerPayments({ ownerUserId, dormId, query = {} }) {
 
   const params = [dormId];
   const conditions = ["i.dorm_id = $1"];
+  const resolvedStatusSql = getResolvedInvoiceStatusSql("i.status", "i.due_date");
 
   if (hasValue(query.month)) {
     params.push(query.month);
@@ -487,8 +517,8 @@ async function listOwnerPayments({ ownerUserId, dormId, query = {} }) {
   }
 
   if (hasValue(query.status) && query.status !== "all") {
-    params.push(query.status);
-    conditions.push(`i.status = $${params.length}`);
+    params.push(String(query.status).trim());
+    conditions.push(`${resolvedStatusSql} = $${params.length}`);
   }
 
   if (hasValue(query.search)) {
@@ -513,7 +543,8 @@ async function listOwnerPayments({ ownerUserId, dormId, query = {} }) {
       i.other_amount,
       i.discount_amount,
       i.total_amount,
-      i.status AS invoice_status,
+      ${resolvedStatusSql} AS invoice_status,
+      i.status AS raw_invoice_status,
       i.updated_at,
 
       r.id AS room_id,
@@ -609,6 +640,8 @@ async function getOwnerPaymentDetailByOwnerId({
 }) {
   await ensureOwnerDorm(ownerUserId, dormId);
 
+  const resolvedStatusSql = getResolvedInvoiceStatusSql("i.status", "i.due_date");
+
   const sql = `
     SELECT
       p.id AS payment_id,
@@ -632,7 +665,8 @@ async function getOwnerPaymentDetailByOwnerId({
       i.other_amount,
       i.discount_amount,
       i.total_amount,
-      i.status AS invoice_status,
+      ${resolvedStatusSql} AS invoice_status,
+      i.status AS raw_invoice_status,
 
       r.room_number,
       r.room_type,
@@ -706,7 +740,11 @@ async function approvePaymentByOwnerId({
           updated_at = now()
         WHERE id = $1
       `,
-      [paymentId, ownerUserId, hasValue(reviewNote) ? String(reviewNote).trim() : null]
+      [
+        paymentId,
+        ownerUserId,
+        hasValue(reviewNote) ? String(reviewNote).trim() : null,
+      ]
     );
 
     await client.query(

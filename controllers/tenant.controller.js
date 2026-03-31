@@ -1,7 +1,9 @@
-const fs = require("fs");
 const path = require("path");
 const bcrypt = require("bcrypt");
 const { pool } = require("../config/db");
+const { supabaseAdmin } = require("../config/supabase");
+
+const CONTRACT_BUCKET = "contract-files";
 
 function s(value) {
   return String(value ?? "").trim();
@@ -28,45 +30,13 @@ function numberOrDefault(value, defaultValue = 0) {
   return Number.isFinite(n) ? n : defaultValue;
 }
 
-function removeUploadedFile(file) {
-  try {
-    if (file?.path && fs.existsSync(file.path)) {
-      fs.unlinkSync(file.path);
-    }
-  } catch (_error) {}
-}
-
 function normalizeStoredContractPath(filePath) {
   const normalized = String(filePath || "")
     .replace(/\\/g, "/")
-    .replace(/^\/+/, "");
+    .replace(/^\/+/, "")
+    .trim();
 
-  if (!normalized) return null;
-
-  if (normalized.startsWith("src/uploads/")) {
-    return normalized.replace(/^src\/uploads\//, "uploads/");
-  }
-
-  return normalized;
-}
-
-function buildRelativeFilePath(file) {
-  if (!file?.path) return null;
-  const projectRoot = path.join(__dirname, "../../");
-  const relativePath = path.relative(projectRoot, file.path).replace(/\\/g, "/");
-  return normalizeStoredContractPath(relativePath);
-}
-
-function buildPublicFileUrl(filePath) {
-  const normalizedPath = normalizeStoredContractPath(filePath);
-  return normalizedPath ? `/${normalizedPath}` : null;
-}
-
-function getAbsoluteStoredFilePath(filePath) {
-  const normalizedPath = normalizeStoredContractPath(filePath);
-  if (!normalizedPath) return null;
-  const projectRoot = path.join(__dirname, "../../");
-  return path.join(projectRoot, normalizedPath);
+  return normalized || null;
 }
 
 function decodeUploadedOriginalName(file) {
@@ -76,6 +46,103 @@ function decodeUploadedOriginalName(file) {
   } catch {
     return file.originalname;
   }
+}
+
+function sanitizeFileName(name) {
+  return String(name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9_-]/g, "");
+}
+
+function getFileExtension(file) {
+  const decodedOriginalName = decodeUploadedOriginalName(file) || "contract.pdf";
+  const ext = path.extname(decodedOriginalName).toLowerCase();
+  if (ext) return ext;
+
+  if (file?.mimetype === "application/pdf") {
+    return ".pdf";
+  }
+
+  return "";
+}
+
+function buildContractStoragePath({ dormId, tenantUserId, file }) {
+  const ext = ".pdf";
+  const safeId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+  return `contracts/${dormId}/${tenantUserId}/${safeId}${ext}`;
+}
+
+function buildContractFileUrl(filePath) {
+  const normalizedPath = normalizeStoredContractPath(filePath);
+  if (!normalizedPath) return null;
+
+  if (/^https?:\/\//i.test(normalizedPath)) {
+    return normalizedPath;
+  }
+
+  if (normalizedPath.startsWith("uploads/")) {
+    return `/${normalizedPath}`;
+  }
+
+  const { data } = supabaseAdmin.storage
+    .from(CONTRACT_BUCKET)
+    .getPublicUrl(normalizedPath);
+
+  return data?.publicUrl || null;
+}
+
+async function uploadContractToSupabase({ file, dormId, tenantUserId }) {
+  if (!file) {
+    return {
+      path: null,
+      url: null,
+      originalName: null,
+      mimeType: null,
+      size: null,
+    };
+  }
+
+  if (!file.buffer) {
+    throw new Error("ไม่พบข้อมูลไฟล์ในหน่วยความจำ กรุณาตรวจสอบ upload middleware");
+  }
+
+  const storagePath = buildContractStoragePath({
+    dormId,
+    tenantUserId,
+    file,
+  });
+
+  const { error } = await supabaseAdmin.storage
+    .from(CONTRACT_BUCKET)
+    .upload(storagePath, file.buffer, {
+      contentType: file.mimetype || "application/pdf",
+      upsert: false,
+    });
+
+  if (error) {
+    throw new Error(`อัปโหลดไฟล์สัญญาไป Supabase ไม่สำเร็จ: ${error.message}`);
+  }
+
+  return {
+    path: storagePath,
+    url: buildContractFileUrl(storagePath),
+    originalName: decodeUploadedOriginalName(file),
+    mimeType: file.mimetype || "application/pdf",
+    size: file.size || null,
+  };
+}
+
+async function removeContractFromSupabase(filePath) {
+  const normalizedPath = normalizeStoredContractPath(filePath);
+  if (!normalizedPath) return;
+
+  if (/^https?:\/\//i.test(normalizedPath)) return;
+  if (normalizedPath.startsWith("uploads/")) return;
+
+  await supabaseAdmin.storage.from(CONTRACT_BUCKET).remove([normalizedPath]);
 }
 
 async function resolveDormIdFromIdentifier(client, identifier) {
@@ -181,7 +248,8 @@ const getTenants = async (req, res) => {
         rc.electric_rate,
         rc.billing_due_day,
         rc.contract_file_path,
-        rc.contract_file_name
+        rc.contract_file_name,
+        rc.contract_file_url
       FROM public.tenant_profiles tp
       JOIN public.users u
         ON u.id = tp.user_id
@@ -211,12 +279,14 @@ const getTenants = async (req, res) => {
     );
 
     const rows = result.rows.map((row) => {
-      const normalizedPath = normalizeStoredContractPath(row.contract_file_path);
+      const fileKey = normalizeStoredContractPath(
+        row.contract_file_path || row.contract_file_url
+      );
 
       return {
         ...row,
-        contract_file_path: normalizedPath,
-        contract_file_url: buildPublicFileUrl(normalizedPath),
+        contract_file_path: fileKey,
+        contract_file_url: buildContractFileUrl(fileKey),
       };
     });
 
@@ -339,41 +409,42 @@ const getTenantFormOptions = async (req, res) => {
 
 const createTenant = async (req, res) => {
   const client = await pool.connect();
+  let uploadedContractPath = null;
 
   try {
     const dormId = req.user?.dormId;
     const file = req.file || null;
+    const body = req.body || {};
 
     if (!dormId) {
-      removeUploadedFile(file);
       return res.status(401).json({
         message: "No dorm in token",
       });
     }
 
-    const fullName = s(req.body.full_name);
-    const phone = nullableString(req.body.phone);
-    const rawUsername = s(req.body.username).toLowerCase();
+    const fullName = s(body.full_name);
+    const phone = nullableString(body.phone);
+    const rawUsername = s(body.username).toLowerCase();
     const username = rawUsername.includes("@")
       ? rawUsername.split("@")[0]
       : rawUsername;
-    const password = s(req.body.password);
-    const roomId = nullableString(req.body.room_id);
-    const buildingId = nullableString(req.body.building_id);
-    const floorNo = integerOrNull(req.body.floor_no);
+    const password = s(body.password);
+    const roomId = nullableString(body.room_id);
+    const buildingId = nullableString(body.building_id);
+    const floorNo = integerOrNull(body.floor_no);
 
-    const startDate = nullableString(req.body.start_date);
-    const endDate = nullableString(req.body.end_date);
+    const startDate = nullableString(body.start_date);
+    const endDate = nullableString(body.end_date);
 
-    const rentAmount = numberOrDefault(req.body.rent_amount, 0);
-    const depositAmount = numberOrDefault(req.body.deposit_amount, 0);
-    const waterRate = numberOrDefault(req.body.water_rate, 0);
-    const electricRate = numberOrDefault(req.body.electric_rate, 0);
-    const billingDueDay = integerOrNull(req.body.billing_due_day);
+    const rentAmount = numberOrDefault(body.rent_amount, 0);
+    const depositAmount = numberOrDefault(body.deposit_amount, 0);
+    const waterRate = numberOrDefault(body.water_rate, 0);
+    const electricRate = numberOrDefault(body.electric_rate, 0);
+    const billingDueDay = integerOrNull(body.billing_due_day);
 
-    const tenantCode = nullableString(req.body.tenant_code);
-    const tenantNote = nullableString(req.body.tenant_note);
-    const contractNote = nullableString(req.body.contract_note);
+    const tenantCode = nullableString(body.tenant_code);
+    const tenantNote = nullableString(body.tenant_note);
+    const contractNote = nullableString(body.contract_note);
 
     const errors = {};
 
@@ -388,7 +459,6 @@ const createTenant = async (req, res) => {
     }
 
     if (Object.keys(errors).length > 0) {
-      removeUploadedFile(file);
       return res.status(400).json({
         message: "ข้อมูลไม่ถูกต้อง",
         errors,
@@ -417,7 +487,6 @@ const createTenant = async (req, res) => {
 
     if (roomResult.rows.length === 0) {
       await client.query("ROLLBACK");
-      removeUploadedFile(file);
       return res.status(404).json({
         message: "ไม่พบห้องที่เลือก หรือห้องนี้ไม่ได้อยู่ในหอของคุณ",
       });
@@ -427,7 +496,6 @@ const createTenant = async (req, res) => {
 
     if (buildingId && room.building_id !== buildingId) {
       await client.query("ROLLBACK");
-      removeUploadedFile(file);
       return res.status(400).json({
         message: "building_id ไม่ตรงกับห้องที่เลือก",
       });
@@ -435,7 +503,6 @@ const createTenant = async (req, res) => {
 
     if (floorNo !== null && Number(room.floor_no) !== floorNo) {
       await client.query("ROLLBACK");
-      removeUploadedFile(file);
       return res.status(400).json({
         message: "floor_no ไม่ตรงกับห้องที่เลือก",
       });
@@ -443,7 +510,6 @@ const createTenant = async (req, res) => {
 
     if (room.status !== "vacant") {
       await client.query("ROLLBACK");
-      removeUploadedFile(file);
       return res.status(409).json({
         message: "ห้องนี้ไม่ว่าง",
       });
@@ -462,7 +528,6 @@ const createTenant = async (req, res) => {
 
     if (activeContractCheck.rows.length > 0) {
       await client.query("ROLLBACK");
-      removeUploadedFile(file);
       return res.status(409).json({
         message: "ห้องนี้มีสัญญา active อยู่แล้ว",
       });
@@ -481,7 +546,6 @@ const createTenant = async (req, res) => {
 
     if (usernameCheck.rows.length > 0) {
       await client.query("ROLLBACK");
-      removeUploadedFile(file);
       return res.status(409).json({
         message: "username นี้ถูกใช้งานแล้วในหอนี้",
       });
@@ -534,12 +598,16 @@ const createTenant = async (req, res) => {
       [tenantUser.id, dormId, tenantCode, tenantNote]
     );
 
-    const relativeFilePath = buildRelativeFilePath(file);
-    const originalFileName = decodeUploadedOriginalName(file);
-    const contractFileUrl = buildPublicFileUrl(relativeFilePath);
+    const uploadedContract = await uploadContractToSupabase({
+      file,
+      dormId,
+      tenantUserId: tenantUser.id,
+    });
+
+    uploadedContractPath = uploadedContract.path;
 
     const finalRentAmount =
-      req.body.rent_amount === undefined || req.body.rent_amount === ""
+      body.rent_amount === undefined || body.rent_amount === ""
         ? Number(room.monthly_rent || 0)
         : rentAmount;
 
@@ -613,11 +681,11 @@ const createTenant = async (req, res) => {
         electricRate,
         billingDueDay,
         contractNote,
-        relativeFilePath,
-        originalFileName,
-        contractFileUrl,
-        file?.mimetype || null,
-        file?.size || null,
+        uploadedContract.path,
+        uploadedContract.originalName,
+        uploadedContract.url,
+        uploadedContract.mimeType,
+        uploadedContract.size,
       ]
     );
 
@@ -645,15 +713,19 @@ const createTenant = async (req, res) => {
           contract_file_path: normalizeStoredContractPath(
             contractResult.rows[0].contract_file_path
           ),
-          contract_file_url: buildPublicFileUrl(
-            contractResult.rows[0].contract_file_path
+          contract_file_url: buildContractFileUrl(
+            contractResult.rows[0].contract_file_path ||
+              contractResult.rows[0].contract_file_url
           ),
         },
       },
     });
   } catch (error) {
-    await client.query("ROLLBACK");
-    removeUploadedFile(req.file);
+    await client.query("ROLLBACK").catch(() => {});
+
+    if (uploadedContractPath) {
+      await removeContractFromSupabase(uploadedContractPath).catch(() => {});
+    }
 
     console.error("CREATE TENANT ERROR:", error);
 
@@ -778,6 +850,7 @@ const endContract = async (req, res) => {
 
 const updateContractFile = async (req, res) => {
   const client = await pool.connect();
+  let newUploadedPath = null;
 
   try {
     const dormId = req.user?.dormId;
@@ -785,7 +858,6 @@ const updateContractFile = async (req, res) => {
     const file = req.file || null;
 
     if (!dormId) {
-      removeUploadedFile(file);
       return res.status(401).json({
         message: "No dorm in token",
       });
@@ -803,6 +875,7 @@ const updateContractFile = async (req, res) => {
       `
       SELECT
         id,
+        tenant_user_id,
         contract_file_path,
         contract_file_name
       FROM public.rental_contracts
@@ -815,16 +888,20 @@ const updateContractFile = async (req, res) => {
 
     if (contractResult.rows.length === 0) {
       await client.query("ROLLBACK");
-      removeUploadedFile(file);
       return res.status(404).json({
         message: "ไม่พบสัญญาเช่า",
       });
     }
 
     const oldFilePath = contractResult.rows[0].contract_file_path;
-    const relativeFilePath = buildRelativeFilePath(file);
-    const originalFileName = decodeUploadedOriginalName(file);
-    const contractFileUrl = buildPublicFileUrl(relativeFilePath);
+
+    const uploadedContract = await uploadContractToSupabase({
+      file,
+      dormId,
+      tenantUserId: contractResult.rows[0].tenant_user_id,
+    });
+
+    newUploadedPath = uploadedContract.path;
 
     await client.query(
       `
@@ -839,11 +916,11 @@ const updateContractFile = async (req, res) => {
       WHERE id = $6
       `,
       [
-        relativeFilePath,
-        originalFileName,
-        contractFileUrl,
-        file.mimetype || null,
-        file.size || null,
+        uploadedContract.path,
+        uploadedContract.originalName,
+        uploadedContract.url,
+        uploadedContract.mimeType,
+        uploadedContract.size,
         contractId,
       ]
     );
@@ -851,26 +928,24 @@ const updateContractFile = async (req, res) => {
     await client.query("COMMIT");
 
     if (oldFilePath) {
-      try {
-        const oldAbsolutePath = getAbsoluteStoredFilePath(oldFilePath);
-        if (oldAbsolutePath && fs.existsSync(oldAbsolutePath)) {
-          fs.unlinkSync(oldAbsolutePath);
-        }
-      } catch (_error) {}
+      await removeContractFromSupabase(oldFilePath).catch(() => {});
     }
 
     return res.status(200).json({
       message: "อัปเดตไฟล์สัญญาสำเร็จ",
       data: {
         contract_id: contractId,
-        contract_file_path: relativeFilePath,
-        contract_file_name: originalFileName,
-        contract_file_url: contractFileUrl,
+        contract_file_path: uploadedContract.path,
+        contract_file_name: uploadedContract.originalName,
+        contract_file_url: uploadedContract.url,
       },
     });
   } catch (error) {
-    await client.query("ROLLBACK");
-    removeUploadedFile(req.file);
+    await client.query("ROLLBACK").catch(() => {});
+
+    if (newUploadedPath) {
+      await removeContractFromSupabase(newUploadedPath).catch(() => {});
+    }
 
     console.error("UPDATE CONTRACT FILE ERROR:", error);
     return res.status(500).json({
@@ -964,10 +1039,10 @@ const getMyRoom = async (req, res) => {
       dormId ? [room.room_id, dormId] : [room.room_id]
     );
 
-    const normalizedContractPath = normalizeStoredContractPath(
+    const fileKey = normalizeStoredContractPath(
       room.contract_file_path || room.contract_file_url
     );
-    const normalizedContractUrl = buildPublicFileUrl(normalizedContractPath);
+    const fileUrl = buildContractFileUrl(fileKey);
 
     return res.status(200).json({
       message: "ดึงข้อมูลห้องของฉันสำเร็จ",
@@ -995,9 +1070,9 @@ const getMyRoom = async (req, res) => {
           billingDueDay: room.billing_due_day,
           status: room.contract_status,
           note: room.contract_note,
-          filePath: normalizedContractPath,
+          filePath: fileKey,
           fileName: room.contract_file_name,
-          fileUrl: normalizedContractUrl,
+          fileUrl,
         },
         furniture: furnitureResult.rows.map((item) => ({
           id: item.id,
